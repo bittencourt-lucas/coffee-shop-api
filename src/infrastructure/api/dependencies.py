@@ -1,5 +1,3 @@
-from fastapi import Depends
-
 from src.infrastructure.database.connection import database
 from src.infrastructure.database.repositories import (
     ProductRepository,
