@@ -8,12 +8,6 @@ orders_table = sqlalchemy.Table(
     sqlalchemy.Column("id", sqlalchemy.String, primary_key=True),
     sqlalchemy.Column("status", sqlalchemy.String, nullable=False),
     sqlalchemy.Column("total_price", sqlalchemy.Float, nullable=False),
-    sqlalchemy.Column(
-        "user_id",
-        sqlalchemy.String,
-        sqlalchemy.ForeignKey("users.id"),
-        nullable=False,
-    ),
 )
 
 order_products_table = sqlalchemy.Table(

@@ -19,7 +19,6 @@ class OrderRepository(AbstractOrderRepository):
                     id=str(order.id),
                     status=order.status.value,
                     total_price=order.total_price,
-                    user_id=str(order.user_id),
                 )
             )
             if order.product_ids:
@@ -71,6 +70,5 @@ class OrderRepository(AbstractOrderRepository):
             id=UUID(row["id"]),
             status=OrderStatus(row["status"]),
             total_price=row["total_price"],
-            user_id=UUID(row["user_id"]),
             product_ids=product_ids,
         )

@@ -6,7 +6,6 @@ from src.core.enums import OrderStatus
 
 
 class OrderCreate(BaseModel):
-    user_id: UUID
     product_ids: list[UUID]
     total_price: float
 
@@ -19,5 +18,4 @@ class OrderResponse(BaseModel):
     id: UUID
     status: OrderStatus
     total_price: float
-    user_id: UUID
     product_ids: list[UUID]
