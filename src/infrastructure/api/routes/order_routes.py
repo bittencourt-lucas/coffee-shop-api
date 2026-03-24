@@ -16,7 +16,6 @@ async def create_order(
     repo: AbstractOrderRepository = Depends(get_order_repository),
 ):
     order = await CreateOrder(repo).execute(
-        user_id=body.user_id,
         product_ids=body.product_ids,
         total_price=body.total_price,
     )
