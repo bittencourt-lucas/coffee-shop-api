@@ -1,4 +1,4 @@
-from .product_schema import ProductCreate, ProductUpdate, ProductResponse
+from .product_schema import ProductCreate, ProductUpdate, ProductResponse, MenuItemResponse, MenuVariationResponse
 from .user_schema import UserCreate, UserResponse
 from .order_schema import OrderCreate, OrderStatusUpdate, OrderResponse
 

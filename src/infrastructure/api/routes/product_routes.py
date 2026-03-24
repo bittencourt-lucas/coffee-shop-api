@@ -4,10 +4,29 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from src.core.repositories import AbstractProductRepository
 from src.infrastructure.api.dependencies import get_product_repository
-from src.infrastructure.api.schemas import ProductCreate, ProductUpdate, ProductResponse
-from src.use_cases.product import CreateProduct, GetProduct, ListProducts, UpdateProduct, DeleteProduct
+from src.infrastructure.api.schemas import ProductCreate, ProductUpdate, ProductResponse, MenuItemResponse, MenuVariationResponse
+from src.use_cases.product import CreateProduct, GetProduct, GetMenu, ListProducts, UpdateProduct, DeleteProduct
 
 router = APIRouter(prefix="/products", tags=["products"])
+menu_router = APIRouter(tags=["menu"])
+
+
+@menu_router.get("/menu", response_model=list[MenuItemResponse])
+async def get_menu(
+    repo: AbstractProductRepository = Depends(get_product_repository),
+):
+    items = await GetMenu(repo).execute()
+    return [
+        MenuItemResponse(
+            name=item.name,
+            base_price=item.base_price,
+            variations=[
+                MenuVariationResponse(variation=v.variation, price_change=v.price_change)
+                for v in item.variations
+            ],
+        )
+        for item in items
+    ]
 
 
 @router.post("/", response_model=ProductResponse, status_code=status.HTTP_201_CREATED)
