@@ -56,14 +56,6 @@ class OrderRepository(AbstractOrderRepository):
             items=items,
         )
 
-    async def list_all(self) -> list[Order]:
-        rows = await self._db.fetch_all(orders_table.select())
-        orders = []
-        for row in rows:
-            product_ids = await self._fetch_product_ids(UUID(row["id"]))
-            orders.append(self._to_entity(row, product_ids))
-        return orders
-
     async def update_status(self, order_id: UUID, status: OrderStatus) -> Order:
         await self._db.execute(
             orders_table.update()

@@ -19,9 +19,5 @@ class AbstractOrderRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def list_all(self) -> list[Order]:
-        raise NotImplementedError
-
-    @abstractmethod
     async def update_status(self, order_id: UUID, status: OrderStatus) -> Order:
         raise NotImplementedError

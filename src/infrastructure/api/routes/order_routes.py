@@ -8,7 +8,7 @@ from src.core.repositories import AbstractOrderRepository
 from src.core.services import AbstractPaymentService, AbstractNotificationService
 from src.infrastructure.api.dependencies import get_order_repository, get_payment_service, get_notification_service, require_roles
 from src.infrastructure.api.schemas import OrderCreate, OrderStatusUpdate, OrderResponse, OrderItemResponse, OrderDetailResponse
-from src.use_cases.order import CreateOrder, GetOrder, GetOrderDetail, ListOrders, UpdateOrderStatus
+from src.use_cases.order import CreateOrder, GetOrderDetail, UpdateOrderStatus
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -28,13 +28,6 @@ async def create_order(
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Payment failed: {exc.detail}")
     return OrderResponse(**vars(order))
 
-
-@router.get("/", response_model=list[OrderResponse])
-async def list_orders(
-    repo: AbstractOrderRepository = Depends(get_order_repository),
-):
-    orders = await ListOrders(repo).execute()
-    return [OrderResponse(**vars(o)) for o in orders]
 
 
 @router.get("/{order_id}", response_model=OrderDetailResponse)
