@@ -1,0 +1,12 @@
+from uuid import UUID
+
+from src.core.entities import OrderDetail
+from src.core.repositories import AbstractOrderRepository
+
+
+class GetOrderDetail:
+    def __init__(self, repository: AbstractOrderRepository) -> None:
+        self._repository = repository
+
+    async def execute(self, order_id: UUID) -> OrderDetail | None:
+        return await self._repository.get_detail_by_id(order_id)

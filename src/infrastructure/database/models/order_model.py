@@ -8,6 +8,12 @@ orders_table = sqlalchemy.Table(
     sqlalchemy.Column("id", sqlalchemy.String, primary_key=True),
     sqlalchemy.Column("status", sqlalchemy.String, nullable=False),
     sqlalchemy.Column("total_price", sqlalchemy.Float, nullable=False),
+    sqlalchemy.Column(
+        "created_at",
+        sqlalchemy.DateTime,
+        server_default=sqlalchemy.func.now(),
+        nullable=False,
+    ),
 )
 
 order_products_table = sqlalchemy.Table(

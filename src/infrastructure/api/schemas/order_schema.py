@@ -1,3 +1,4 @@
+from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -19,3 +20,18 @@ class OrderResponse(BaseModel):
     status: OrderStatus
     total_price: float
     product_ids: list[UUID]
+
+
+class OrderItemResponse(BaseModel):
+    id: UUID
+    name: str
+    variation: str
+    unit_price: float
+
+
+class OrderDetailResponse(BaseModel):
+    id: UUID
+    status: OrderStatus
+    total_price: float
+    created_at: datetime
+    items: list[OrderItemResponse]
