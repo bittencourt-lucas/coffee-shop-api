@@ -37,7 +37,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install "fastapi[standard]" "databases[aiosqlite]" alembic pytest pytest-asyncio httpx
+        run: pip install "fastapi[standard]" "databases[aiosqlite]" alembic pytest pytest-asyncio httpx slowapi
 
       - name: Run tests
         run: pytest tests/ -v
