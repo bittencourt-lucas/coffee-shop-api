@@ -1,9 +1,12 @@
+from uuid import UUID
+
 from pydantic import BaseModel
 
 
 class MenuVariationResponse(BaseModel):
+    id: UUID
     variation: str
-    price_change: float
+    unit_price: float
 
 
 class MenuItemResponse(BaseModel):

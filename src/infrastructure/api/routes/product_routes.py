@@ -20,8 +20,12 @@ async def get_menu(
             name=item.name,
             base_price=item.base_price,
             variations=[
-                MenuVariationResponse(variation=v.variation, price_change=v.price_change)
-                for v in item.variations
+                MenuVariationResponse(
+                    id=variation.id,
+                    variation=variation.variation,
+                    unit_price=variation.unit_price,
+                )
+                for variation in item.variations
             ],
         )
         for item in items

@@ -3,13 +3,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 
 from src.core.enums import Role
-from src.core.exceptions import PaymentFailedError, InvalidStatusTransitionError
-from src.core.repositories import AbstractOrderRepository
-from src.core.services import AbstractPaymentService, AbstractNotificationService
+from src.core.exceptions import InvalidProductError, InvalidStatusTransitionError, PaymentFailedError
+from src.core.repositories import AbstractOrderRepository, AbstractProductRepository
+from src.core.services import AbstractNotificationService, AbstractPaymentService
 from src.infrastructure.api.dependencies import (
     get_notification_service,
     get_order_repository,
     get_payment_service,
+    get_product_repository,
     require_roles,
 )
 from src.infrastructure.api.schemas import (
@@ -27,14 +28,16 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 @router.post("/", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
 async def create_order(
     body: OrderCreate,
-    repo: AbstractOrderRepository = Depends(get_order_repository),
+    order_repo: AbstractOrderRepository = Depends(get_order_repository),
+    product_repo: AbstractProductRepository = Depends(get_product_repository),
     payment_service: AbstractPaymentService = Depends(get_payment_service),
 ):
     try:
-        order = await CreateOrder(repo, payment_service).execute(
+        order = await CreateOrder(order_repo, product_repo, payment_service).execute(
             product_ids=body.product_ids,
-            total_price=body.total_price,
         )
+    except InvalidProductError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
     except PaymentFailedError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Payment failed: {exc.detail}")
     return OrderResponse(**vars(order))
