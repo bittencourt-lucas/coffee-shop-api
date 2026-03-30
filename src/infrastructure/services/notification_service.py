@@ -1,10 +1,12 @@
 import asyncio
+import logging
 
 import httpx
 
 from src.core.services import AbstractNotificationService
+from src.infrastructure.settings import settings
 
-NOTIFICATION_URL = "https://challenge.trio.dev/api/v1/notification"
+logger = logging.getLogger(__name__)
 
 
 class NotificationService(AbstractNotificationService):
@@ -14,8 +16,8 @@ class NotificationService(AbstractNotificationService):
     @staticmethod
     async def _send(status: str) -> None:
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(NOTIFICATION_URL, json={"status": status})
-            print(f"[Notification] HTTP {response.status_code}: {response.json()}")
+            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                response = await client.post(settings.notification_url, json={"status": status})
+            logger.info("HTTP %d: %s", response.status_code, response.json())
         except Exception as exc:
-            print(f"[Notification] Failed: {exc}")
+            logger.error("Failed: %s", exc)

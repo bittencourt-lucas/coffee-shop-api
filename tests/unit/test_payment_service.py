@@ -43,13 +43,12 @@ async def test_returns_response_data_on_success():
     assert result == _SUCCESS_DATA
 
 
-async def test_prints_full_response_to_terminal(capsys):
+async def test_logs_full_response(caplog):
     patcher, _ = _patch_client(_make_response(200, _SUCCESS_DATA))
-    with patcher:
+    with patcher, caplog.at_level("INFO"):
         await PaymentService().process(19.90)
-    captured = capsys.readouterr()
-    assert "200" in captured.out
-    assert str(_SUCCESS_DATA) in captured.out
+    assert "200" in caplog.text
+    assert str(_SUCCESS_DATA) in caplog.text
 
 
 async def test_does_not_retry_on_first_success():
@@ -122,14 +121,13 @@ async def test_retries_exactly_three_times_on_request_error():
     assert mock_inner.post.call_count == 3
 
 
-async def test_prints_each_failed_attempt(capsys):
+async def test_logs_each_failed_attempt(caplog):
     patcher, _ = _patch_client(
         _make_response(500, _FAILURE_DATA),
         _make_response(500, _FAILURE_DATA),
         _make_response(200, _SUCCESS_DATA),
     )
-    with patcher:
+    with patcher, caplog.at_level("INFO"):
         await PaymentService().process(19.90)
-    captured = capsys.readouterr()
-    assert "1/3" in captured.out
-    assert "2/3" in captured.out
+    assert "1/3" in caplog.text
+    assert "2/3" in caplog.text

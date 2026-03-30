@@ -38,8 +38,8 @@ async def create_order(
         )
     except InvalidProductError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
-    except PaymentFailedError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Payment failed: {exc.detail}")
+    except PaymentFailedError:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Payment could not be processed")
     return OrderResponse(**vars(order))
 
 
