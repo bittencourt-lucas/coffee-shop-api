@@ -1,13 +1,13 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.core.enums import OrderStatus
 
 
 class OrderCreate(BaseModel):
-    product_ids: list[UUID]
+    product_ids: list[UUID] = Field(..., min_length=1, max_length=50)
 
 
 class OrderStatusUpdate(BaseModel):

@@ -1,9 +1,12 @@
+import logging
+
 import httpx
 
 from src.core.exceptions import PaymentFailedError
 from src.core.services import AbstractPaymentService
+from src.infrastructure.settings import settings
 
-PAYMENT_URL = "https://challenge.trio.dev/api/v1/payment"
+logger = logging.getLogger(__name__)
 MAX_RETRIES = 3
 
 
@@ -13,11 +16,11 @@ class PaymentService(AbstractPaymentService):
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.post(PAYMENT_URL, json={"value": value})
+                async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
+                    response = await client.post(settings.payment_url, json={"value": value})
 
                 data = response.json()
-                print(f"[Payment] Attempt {attempt}/{MAX_RETRIES} — HTTP {response.status_code}: {data}")
+                logger.info("Attempt %d/%d — HTTP %d: %s", attempt, MAX_RETRIES, response.status_code, data)
 
                 if response.is_success:
                     return data
@@ -26,6 +29,6 @@ class PaymentService(AbstractPaymentService):
 
             except httpx.RequestError as exc:
                 last_error = str(exc)
-                print(f"[Payment] Attempt {attempt}/{MAX_RETRIES} — Request error: {exc}")
+                logger.error("Attempt %d/%d — Request error: %s", attempt, MAX_RETRIES, exc)
 
         raise PaymentFailedError(last_error)
