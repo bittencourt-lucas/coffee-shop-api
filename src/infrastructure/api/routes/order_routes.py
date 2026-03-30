@@ -6,8 +6,8 @@ from src.core.exceptions import PaymentFailedError
 from src.core.repositories import AbstractOrderRepository
 from src.core.services import AbstractPaymentService
 from src.infrastructure.api.dependencies import get_order_repository, get_payment_service
-from src.infrastructure.api.schemas import OrderCreate, OrderStatusUpdate, OrderResponse
-from src.use_cases.order import CreateOrder, GetOrder, ListOrders, UpdateOrderStatus
+from src.infrastructure.api.schemas import OrderCreate, OrderStatusUpdate, OrderResponse, OrderItemResponse, OrderDetailResponse
+from src.use_cases.order import CreateOrder, GetOrder, GetOrderDetail, ListOrders, UpdateOrderStatus
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -36,15 +36,21 @@ async def list_orders(
     return [OrderResponse(**vars(o)) for o in orders]
 
 
-@router.get("/{order_id}", response_model=OrderResponse)
+@router.get("/{order_id}", response_model=OrderDetailResponse)
 async def get_order(
     order_id: UUID,
     repo: AbstractOrderRepository = Depends(get_order_repository),
 ):
-    order = await GetOrder(repo).execute(order_id)
+    order = await GetOrderDetail(repo).execute(order_id)
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
-    return OrderResponse(**vars(order))
+    return OrderDetailResponse(
+        id=order.id,
+        status=order.status,
+        total_price=order.total_price,
+        created_at=order.created_at,
+        items=[OrderItemResponse(**vars(item)) for item in order.items],
+    )
 
 
 @router.patch("/{order_id}/status", response_model=OrderResponse)

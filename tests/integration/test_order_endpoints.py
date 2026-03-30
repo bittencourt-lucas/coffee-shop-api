@@ -79,3 +79,35 @@ class TestCreateOrderPaymentError:
     async def test_error_detail_mentions_payment(self, failing_payment_client: AsyncClient):
         data = (await failing_payment_client.post("/orders/", json=_ORDER_PAYLOAD)).json()
         assert "payment" in data["detail"].lower()
+
+
+class TestGetOrderDetail:
+    async def test_returns_404_for_unknown_order(self, order_client: AsyncClient):
+        response = await order_client.get(f"/orders/{uuid4()}")
+        assert response.status_code == 404
+
+    async def test_returns_200_for_existing_order(self, order_client: AsyncClient):
+        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+        response = await order_client.get(f"/orders/{order_id}")
+        assert response.status_code == 200
+
+    async def test_response_contains_required_fields(self, order_client: AsyncClient):
+        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+        data = (await order_client.get(f"/orders/{order_id}")).json()
+        assert "id" in data
+        assert "status" in data
+        assert "total_price" in data
+        assert "created_at" in data
+        assert "items" in data
+
+    async def test_detail_matches_created_order(self, order_client: AsyncClient):
+        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+        data = (await order_client.get(f"/orders/{order_id}")).json()
+        assert data["id"] == order_id
+        assert data["status"] == "WAITING"
+        assert data["total_price"] == _TOTAL_PRICE
+
+    async def test_items_list_is_present(self, order_client: AsyncClient):
+        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+        data = (await order_client.get(f"/orders/{order_id}")).json()
+        assert isinstance(data["items"], list)

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from uuid import UUID
 
-from src.core.entities import Order
+from src.core.entities import Order, OrderDetail
 from src.core.enums import OrderStatus
 
 
@@ -12,6 +12,10 @@ class AbstractOrderRepository(ABC):
 
     @abstractmethod
     async def get_by_id(self, order_id: UUID) -> Order | None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_detail_by_id(self, order_id: UUID) -> OrderDetail | None:
         raise NotImplementedError
 
     @abstractmethod
