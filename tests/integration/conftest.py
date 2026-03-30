@@ -7,6 +7,7 @@ import sqlalchemy
 from httpx import ASGITransport, AsyncClient
 
 from src.infrastructure.api.dependencies import get_product_repository
+from src.infrastructure.api.middleware.rate_limit import limiter
 from src.infrastructure.database.connection import metadata
 from src.infrastructure.database.repositories import ProductRepository
 from src.infrastructure.database.seed import seed_catalog as real_seed_catalog
@@ -65,6 +66,7 @@ class _ClientContext:
     async def __aenter__(self) -> AsyncClient:
         for p in self._patches:
             p.start()
+        limiter.enabled = False
         self._http = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
         return await self._http.__aenter__()
 
@@ -72,6 +74,7 @@ class _ClientContext:
         await self._http.__aexit__(*args)
         for p in self._patches:
             p.stop()
+        limiter.enabled = True
         app.dependency_overrides.clear()
 
 

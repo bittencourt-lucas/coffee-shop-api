@@ -14,12 +14,12 @@ The project follows Clean Architecture with a Repository Pattern, organized into
 
 All requests require an `X-Role` header. Valid values: `CUSTOMER`, `MANAGER`. Defaults to `CUSTOMER` if omitted.
 
-| Method  | Path                      | Role     | Description                                      |
-|---------|---------------------------|----------|--------------------------------------------------|
-| `GET`   | `/menu`                   | Any      | List all products grouped by name with variations |
-| `POST`  | `/orders/`                | Any      | Create an order and process payment              |
-| `GET`   | `/orders/{id}`            | Any      | Get full order details                           |
-| `PATCH` | `/orders/{id}/status`     | MANAGER  | Advance order status                             |
+| Method  | Path                      | Role     | Rate Limit | Description                                      |
+|---------|---------------------------|----------|------------|--------------------------------------------------|
+| `GET`   | `/menu`                   | Any      | —          | List all products grouped by name with variations |
+| `POST`  | `/orders/`                | Any      | 10/min     | Create an order and process payment              |
+| `GET`   | `/orders/{id}`            | Any      | —          | Get full order details                           |
+| `PATCH` | `/orders/{id}/status`     | MANAGER  | —          | Advance order status                             |
 
 ### Order Status Flow
 
@@ -33,8 +33,18 @@ Any out-of-sequence update returns `422`.
 
 ### External Integrations
 
-- **Payment** (`POST /api/v1/payment`) — called on order creation. Retries up to 3 times; returns `502` if all attempts fail.
-- **Notification** (`POST /api/v1/notification`) — called after every status update. Runs as a fire-and-forget background task; failures are logged to the terminal and never affect the response.
+- **Payment** (`POST /api/v1/payment`) — called on order creation. Retries up to 3 times; returns `502` if all attempts fail. External service errors are not exposed to clients.
+- **Notification** (`POST /api/v1/notification`) — called after every status update. Runs as a fire-and-forget background task; failures are logged and never affect the response.
+
+### Security
+
+- **CORS** — Restricted to explicit allowed origins, methods, and headers via `CORSMiddleware`.
+- **Rate limiting** — `POST /orders/` is limited to 10 requests/minute per IP using `slowapi`. Exceeding the limit returns `429 Too Many Requests`.
+- **Input validation** — `product_ids` is capped at 50 items per order to prevent abuse.
+- **Error sanitization** — External service errors are logged server-side only; clients receive generic error messages.
+- **Structured logging** — Payment and notification services use Python `logging` instead of `print`.
+- **Configurable secrets** — All external URLs and the database connection string are loaded from environment variables via `pydantic-settings`, not hardcoded.
+- **Explicit timeouts** — All outbound HTTP calls use a 10-second timeout.
 
 ---
 
@@ -54,8 +64,21 @@ source venv/bin/activate        # macOS/Linux
 venv\Scripts\activate           # Windows
 
 # Install dependencies
-pip install fastapi[standard] databases[aiosqlite] alembic httpx
+pip install fastapi[standard] databases[aiosqlite] alembic httpx pydantic-settings slowapi
+
+# (Optional) Copy and edit the environment file
+cp .env.example .env
 ```
+
+### Configuration
+
+All settings can be overridden via environment variables (prefixed with `COFFEE_SHOP_`):
+
+| Variable                       | Default                                          | Description            |
+|--------------------------------|--------------------------------------------------|------------------------|
+| `COFFEE_SHOP_DATABASE_URL`     | `sqlite+aiosqlite:///./coffee_shop.db`           | Database connection    |
+| `COFFEE_SHOP_PAYMENT_URL`      | `https://challenge.trio.dev/api/v1/payment`      | Payment service URL    |
+| `COFFEE_SHOP_NOTIFICATION_URL` | `https://challenge.trio.dev/api/v1/notification`  | Notification service URL |
 
 ### Database
 

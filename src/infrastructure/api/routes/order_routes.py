@@ -1,6 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from src.core.enums import Role
 from src.core.exceptions import InvalidProductError, InvalidStatusTransitionError, PaymentFailedError
@@ -20,13 +20,16 @@ from src.infrastructure.api.schemas import (
     OrderResponse,
     OrderStatusUpdate,
 )
+from src.infrastructure.api.middleware.rate_limit import limiter
 from src.use_cases.order import CreateOrder, GetOrderDetail, UpdateOrderStatus
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
 
 @router.post("/", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit("10/minute")
 async def create_order(
+    request: Request,
     body: OrderCreate,
     order_repo: AbstractOrderRepository = Depends(get_order_repository),
     product_repo: AbstractProductRepository = Depends(get_product_repository),

@@ -2,7 +2,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from slowapi import _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
 
+from src.infrastructure.api.middleware.rate_limit import limiter
 from src.infrastructure.api.middleware.role_middleware import RoleMiddleware
 from src.infrastructure.database.connection import database
 from src.infrastructure.database.seed import seed_catalog
@@ -18,6 +21,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Coffee Shop API", lifespan=lifespan)
+
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(RoleMiddleware)
 app.add_middleware(
