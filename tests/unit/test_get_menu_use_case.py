@@ -73,7 +73,7 @@ async def test_menu_item_contains_all_variations(repo):
     assert variation_names == {"Vanilla", "Hazelnut", "Pumpkin Spice"}
 
 
-async def test_variation_price_changes_are_correct(repo):
+async def test_variation_unit_prices_are_computed_correctly(repo):
     repo.list_all.return_value = [
         _make_product("Espresso", 2.5, "Single Shot", 0.00),
         _make_product("Espresso", 2.5, "Double Shot", 1.00),
@@ -82,9 +82,18 @@ async def test_variation_price_changes_are_correct(repo):
     result = await GetMenu(repo).execute()
 
     espresso = result[0]
-    price_changes = {v.variation: v.price_change for v in espresso.variations}
-    assert price_changes["Single Shot"] == 0.00
-    assert price_changes["Double Shot"] == 1.00
+    unit_prices = {v.variation: v.unit_price for v in espresso.variations}
+    assert unit_prices["Single Shot"] == 2.50
+    assert unit_prices["Double Shot"] == 3.50
+
+
+async def test_each_variation_exposes_its_product_id(repo):
+    product = _make_product("Espresso", 2.5, "Single Shot", 0.00)
+    repo.list_all.return_value = [product]
+
+    result = await GetMenu(repo).execute()
+
+    assert result[0].variations[0].id == product.id
 
 
 async def test_menu_item_base_price_is_preserved(repo):

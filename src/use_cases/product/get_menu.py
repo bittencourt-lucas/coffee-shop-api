@@ -1,19 +1,7 @@
 from collections import defaultdict
 
+from src.core.entities import MenuItem, MenuVariation
 from src.core.repositories import AbstractProductRepository
-
-
-class MenuVariation:
-    def __init__(self, variation: str, price_change: float) -> None:
-        self.variation = variation
-        self.price_change = price_change
-
-
-class MenuItem:
-    def __init__(self, name: str, base_price: float, variations: list[MenuVariation]) -> None:
-        self.name = name
-        self.base_price = base_price
-        self.variations = variations
 
 
 class GetMenu:
@@ -26,7 +14,13 @@ class GetMenu:
         grouped: dict[tuple, list[MenuVariation]] = defaultdict(list)
         for product in products:
             key = (product.name, product.base_price)
-            grouped[key].append(MenuVariation(product.variation, product.price_change))
+            grouped[key].append(
+                MenuVariation(
+                    id=product.id,
+                    variation=product.variation,
+                    unit_price=round(product.base_price + product.price_change, 2),
+                )
+            )
 
         return [
             MenuItem(name=name, base_price=base_price, variations=variations)

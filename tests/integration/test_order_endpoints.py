@@ -4,29 +4,44 @@ from uuid import uuid4
 import pytest
 from httpx import AsyncClient
 
-from src.core.exceptions import PaymentFailedError
 from src.core.enums import OrderStatus
-from src.infrastructure.api.dependencies import get_order_repository, get_payment_service, get_notification_service
-from src.infrastructure.database.repositories import OrderRepository
+from src.core.exceptions import PaymentFailedError
+from src.infrastructure.api.dependencies import (
+    get_notification_service,
+    get_order_repository,
+    get_payment_service,
+    get_product_repository,
+)
+from src.infrastructure.database.repositories import OrderRepository, ProductRepository
+from src.infrastructure.database.seed import seed_catalog as real_seed_catalog
 from src.main import app
 
 from tests.integration.conftest import _ClientContext
 
 
-_PRODUCT_IDS = [str(uuid4()), str(uuid4())]
-_TOTAL_PRICE = 19.90
-_ORDER_PAYLOAD = {"product_ids": _PRODUCT_IDS, "total_price": _TOTAL_PRICE}
+async def _get_product_ids(client: AsyncClient, count: int = 2) -> list[str]:
+    """Fetch real product IDs from the seeded menu."""
+    menu = (await client.get("/menu")).json()
+    ids = []
+    for item in menu:
+        for variation in item["variations"]:
+            ids.append(variation["id"])
+            if len(ids) == count:
+                return ids
+    return ids
 
 
 @pytest.fixture
 async def order_client(test_db):
-    """HTTP client with order repository wired to the test DB and a successful payment mock."""
+    """HTTP client with catalog seeded and all dependencies wired to the test DB."""
+    await real_seed_catalog(test_db)
+
     mock_payment = AsyncMock()
     mock_payment.process.return_value = {"id": "pay-123", "status": "approved"}
-
     mock_notification = AsyncMock()
 
     app.dependency_overrides[get_order_repository] = lambda: OrderRepository(test_db)
+    app.dependency_overrides[get_product_repository] = lambda: ProductRepository(test_db)
     app.dependency_overrides[get_payment_service] = lambda: mock_payment
     app.dependency_overrides[get_notification_service] = lambda: mock_notification
 
@@ -37,12 +52,14 @@ async def order_client(test_db):
 @pytest.fixture
 async def failing_payment_client(test_db):
     """HTTP client where the payment service always raises PaymentFailedError."""
+    await real_seed_catalog(test_db)
+
     mock_payment = AsyncMock()
     mock_payment.process.side_effect = PaymentFailedError("payment declined after 3 retries")
-
     mock_notification = AsyncMock()
 
     app.dependency_overrides[get_order_repository] = lambda: OrderRepository(test_db)
+    app.dependency_overrides[get_product_repository] = lambda: ProductRepository(test_db)
     app.dependency_overrides[get_payment_service] = lambda: mock_payment
     app.dependency_overrides[get_notification_service] = lambda: mock_notification
 
@@ -52,45 +69,58 @@ async def failing_payment_client(test_db):
 
 class TestCreateOrderStatus:
     async def test_returns_201_on_successful_payment(self, order_client: AsyncClient):
-        response = await order_client.post("/orders/", json=_ORDER_PAYLOAD)
+        product_ids = await _get_product_ids(order_client)
+        response = await order_client.post("/orders/", json={"product_ids": product_ids})
         assert response.status_code == 201
 
     async def test_returns_502_when_payment_fails(self, failing_payment_client: AsyncClient):
-        response = await failing_payment_client.post("/orders/", json=_ORDER_PAYLOAD)
+        product_ids = await _get_product_ids(failing_payment_client)
+        response = await failing_payment_client.post("/orders/", json={"product_ids": product_ids})
         assert response.status_code == 502
 
     async def test_returns_422_on_missing_body(self, order_client: AsyncClient):
         response = await order_client.post("/orders/", json={})
         assert response.status_code == 422
 
+    async def test_returns_422_for_unknown_product_ids(self, order_client: AsyncClient):
+        response = await order_client.post("/orders/", json={"product_ids": [str(uuid4())]})
+        assert response.status_code == 422
+
 
 class TestCreateOrderResponse:
     async def test_response_contains_id(self, order_client: AsyncClient):
-        data = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()
+        product_ids = await _get_product_ids(order_client)
+        data = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()
         assert "id" in data
 
     async def test_order_status_is_waiting(self, order_client: AsyncClient):
-        data = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()
+        product_ids = await _get_product_ids(order_client)
+        data = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()
         assert data["status"] == "WAITING"
 
-    async def test_total_price_matches_request(self, order_client: AsyncClient):
-        data = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()
-        assert data["total_price"] == _TOTAL_PRICE
+    async def test_total_price_is_computed_from_products(self, order_client: AsyncClient):
+        menu = (await order_client.get("/menu")).json()
+        variation = menu[0]["variations"][0]
+        data = (await order_client.post("/orders/", json={"product_ids": [variation["id"]]})).json()
+        assert data["total_price"] == variation["unit_price"]
 
     async def test_product_ids_match_request(self, order_client: AsyncClient):
-        data = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()
-        assert set(data["product_ids"]) == set(_PRODUCT_IDS)
+        product_ids = await _get_product_ids(order_client)
+        data = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()
+        assert set(data["product_ids"]) == set(product_ids)
 
 
 class TestCreateOrderPaymentError:
     async def test_error_detail_mentions_payment(self, failing_payment_client: AsyncClient):
-        data = (await failing_payment_client.post("/orders/", json=_ORDER_PAYLOAD)).json()
+        product_ids = await _get_product_ids(failing_payment_client)
+        data = (await failing_payment_client.post("/orders/", json={"product_ids": product_ids})).json()
         assert "payment" in data["detail"].lower()
 
 
 class TestUpdateOrderStatusAccess:
     async def test_returns_403_for_customer_role(self, order_client: AsyncClient):
-        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+        product_ids = await _get_product_ids(order_client)
+        order_id = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()["id"]
         response = await order_client.patch(
             f"/orders/{order_id}/status",
             json={"status": OrderStatus.PREPARATION.value},
@@ -99,7 +129,8 @@ class TestUpdateOrderStatusAccess:
         assert response.status_code == 403
 
     async def test_returns_200_for_manager_role(self, order_client: AsyncClient):
-        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+        product_ids = await _get_product_ids(order_client)
+        order_id = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()["id"]
         response = await order_client.patch(
             f"/orders/{order_id}/status",
             json={"status": OrderStatus.PREPARATION.value},
@@ -110,7 +141,8 @@ class TestUpdateOrderStatusAccess:
 
 class TestUpdateOrderStatusTransitions:
     async def test_valid_transition_waiting_to_preparation(self, order_client: AsyncClient):
-        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+        product_ids = await _get_product_ids(order_client)
+        order_id = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()["id"]
         data = (await order_client.patch(
             f"/orders/{order_id}/status",
             json={"status": OrderStatus.PREPARATION.value},
@@ -119,7 +151,8 @@ class TestUpdateOrderStatusTransitions:
         assert data["status"] == OrderStatus.PREPARATION.value
 
     async def test_invalid_transition_waiting_to_ready(self, order_client: AsyncClient):
-        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+        product_ids = await _get_product_ids(order_client)
+        order_id = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()["id"]
         response = await order_client.patch(
             f"/orders/{order_id}/status",
             json={"status": OrderStatus.READY.value},
@@ -128,7 +161,8 @@ class TestUpdateOrderStatusTransitions:
         assert response.status_code == 422
 
     async def test_invalid_transition_waiting_to_delivered(self, order_client: AsyncClient):
-        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+        product_ids = await _get_product_ids(order_client)
+        order_id = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()["id"]
         response = await order_client.patch(
             f"/orders/{order_id}/status",
             json={"status": OrderStatus.DELIVERED.value},
@@ -137,7 +171,8 @@ class TestUpdateOrderStatusTransitions:
         assert response.status_code == 422
 
     async def test_full_transition_chain(self, order_client: AsyncClient):
-        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+        product_ids = await _get_product_ids(order_client)
+        order_id = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()["id"]
         for new_status in [OrderStatus.PREPARATION, OrderStatus.READY, OrderStatus.DELIVERED]:
             data = (await order_client.patch(
                 f"/orders/{order_id}/status",
@@ -155,7 +190,8 @@ class TestUpdateOrderStatusTransitions:
         assert response.status_code == 404
 
     async def test_transition_error_detail_message(self, order_client: AsyncClient):
-        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+        product_ids = await _get_product_ids(order_client)
+        order_id = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()["id"]
         data = (await order_client.patch(
             f"/orders/{order_id}/status",
             json={"status": OrderStatus.DELIVERED.value},
@@ -170,12 +206,14 @@ class TestGetOrderDetail:
         assert response.status_code == 404
 
     async def test_returns_200_for_existing_order(self, order_client: AsyncClient):
-        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+        product_ids = await _get_product_ids(order_client)
+        order_id = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()["id"]
         response = await order_client.get(f"/orders/{order_id}")
         assert response.status_code == 200
 
     async def test_response_contains_required_fields(self, order_client: AsyncClient):
-        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+        product_ids = await _get_product_ids(order_client)
+        order_id = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()["id"]
         data = (await order_client.get(f"/orders/{order_id}")).json()
         assert "id" in data
         assert "status" in data
@@ -184,13 +222,20 @@ class TestGetOrderDetail:
         assert "items" in data
 
     async def test_detail_matches_created_order(self, order_client: AsyncClient):
-        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
-        data = (await order_client.get(f"/orders/{order_id}")).json()
-        assert data["id"] == order_id
+        product_ids = await _get_product_ids(order_client, count=1)
+        created = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()
+        data = (await order_client.get(f"/orders/{created['id']}")).json()
+        assert data["id"] == created["id"]
         assert data["status"] == "WAITING"
-        assert data["total_price"] == _TOTAL_PRICE
+        assert data["total_price"] == created["total_price"]
 
-    async def test_items_list_is_present(self, order_client: AsyncClient):
-        order_id = (await order_client.post("/orders/", json=_ORDER_PAYLOAD)).json()["id"]
+    async def test_items_contain_product_details(self, order_client: AsyncClient):
+        product_ids = await _get_product_ids(order_client, count=1)
+        order_id = (await order_client.post("/orders/", json={"product_ids": product_ids})).json()["id"]
         data = (await order_client.get(f"/orders/{order_id}")).json()
-        assert isinstance(data["items"], list)
+        assert len(data["items"]) == 1
+        item = data["items"][0]
+        assert "id" in item
+        assert "name" in item
+        assert "variation" in item
+        assert "unit_price" in item

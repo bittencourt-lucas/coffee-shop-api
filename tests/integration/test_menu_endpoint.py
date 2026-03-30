@@ -2,11 +2,9 @@ from httpx import AsyncClient
 
 from src.infrastructure.database.seed import CATALOG
 
-# Number of distinct product names in the catalog
 _DISTINCT_PRODUCTS = len({item["name"] for item in CATALOG})
 
-# Expected variations count per product, derived from the catalog
-_VARIATIONS_PER_PRODUCT = {}
+_VARIATIONS_PER_PRODUCT: dict[str, list[str]] = {}
 for item in CATALOG:
     _VARIATIONS_PER_PRODUCT.setdefault(item["name"], []).append(item["variation"])
 
@@ -23,8 +21,8 @@ class TestGetMenuStatus:
 
 class TestGetMenuResponseShape:
     async def test_response_is_a_list(self, seeded_client: AsyncClient):
-        response = await seeded_client.get("/menu")
-        assert isinstance(response.json(), list)
+        data = (await seeded_client.get("/menu")).json()
+        assert isinstance(data, list)
 
     async def test_each_item_has_name_field(self, seeded_client: AsyncClient):
         data = (await seeded_client.get("/menu")).json()
@@ -42,17 +40,23 @@ class TestGetMenuResponseShape:
             assert "variations" in item
             assert isinstance(item["variations"], list)
 
+    async def test_each_variation_has_id_field(self, seeded_client: AsyncClient):
+        data = (await seeded_client.get("/menu")).json()
+        for item in data:
+            for variation in item["variations"]:
+                assert "id" in variation
+
     async def test_each_variation_has_variation_field(self, seeded_client: AsyncClient):
         data = (await seeded_client.get("/menu")).json()
         for item in data:
             for variation in item["variations"]:
                 assert "variation" in variation
 
-    async def test_each_variation_has_price_change_field(self, seeded_client: AsyncClient):
+    async def test_each_variation_has_unit_price_field(self, seeded_client: AsyncClient):
         data = (await seeded_client.get("/menu")).json()
         for item in data:
             for variation in item["variations"]:
-                assert "price_change" in variation
+                assert "unit_price" in variation
 
 
 class TestGetMenuGrouping:
@@ -95,17 +99,17 @@ class TestGetMenuCatalogData:
         variation_names = {v["variation"] for v in latte["variations"]}
         assert variation_names == {"Pumpkin Spice", "Vanilla", "Hazelnut"}
 
-    async def test_espresso_double_shot_price_change(self, seeded_client: AsyncClient):
+    async def test_espresso_double_shot_unit_price(self, seeded_client: AsyncClient):
         data = (await seeded_client.get("/menu")).json()
         espresso = next(item for item in data if item["name"] == "Espresso")
         double_shot = next(v for v in espresso["variations"] if v["variation"] == "Double Shot")
-        assert double_shot["price_change"] == 1.00
+        assert double_shot["unit_price"] == 3.50
 
-    async def test_espresso_single_shot_has_zero_price_change(self, seeded_client: AsyncClient):
+    async def test_espresso_single_shot_unit_price(self, seeded_client: AsyncClient):
         data = (await seeded_client.get("/menu")).json()
         espresso = next(item for item in data if item["name"] == "Espresso")
         single_shot = next(v for v in espresso["variations"] if v["variation"] == "Single Shot")
-        assert single_shot["price_change"] == 0.00
+        assert single_shot["unit_price"] == 2.50
 
     async def test_donuts_has_correct_base_price(self, seeded_client: AsyncClient):
         data = (await seeded_client.get("/menu")).json()
