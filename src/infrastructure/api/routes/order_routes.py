@@ -2,8 +2,10 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from src.core.exceptions import PaymentFailedError
 from src.core.repositories import AbstractOrderRepository
-from src.infrastructure.api.dependencies import get_order_repository
+from src.core.services import AbstractPaymentService
+from src.infrastructure.api.dependencies import get_order_repository, get_payment_service
 from src.infrastructure.api.schemas import OrderCreate, OrderStatusUpdate, OrderResponse
 from src.use_cases.order import CreateOrder, GetOrder, ListOrders, UpdateOrderStatus
 
@@ -14,11 +16,15 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 async def create_order(
     body: OrderCreate,
     repo: AbstractOrderRepository = Depends(get_order_repository),
+    payment_service: AbstractPaymentService = Depends(get_payment_service),
 ):
-    order = await CreateOrder(repo).execute(
-        product_ids=body.product_ids,
-        total_price=body.total_price,
-    )
+    try:
+        order = await CreateOrder(repo, payment_service).execute(
+            product_ids=body.product_ids,
+            total_price=body.total_price,
+        )
+    except PaymentFailedError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Payment failed: {exc.detail}")
     return OrderResponse(**vars(order))
 
 

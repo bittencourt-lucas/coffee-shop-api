@@ -4,6 +4,12 @@ from src.core.enums import Role
 from src.infrastructure.database.connection import database
 from src.infrastructure.database.repositories import ProductRepository, OrderRepository
 from src.core.repositories import AbstractProductRepository, AbstractOrderRepository
+from src.core.services import AbstractPaymentService
+from src.infrastructure.services import PaymentService
+
+
+def get_payment_service() -> AbstractPaymentService:
+    return PaymentService()
 
 
 def get_product_repository() -> AbstractProductRepository:
