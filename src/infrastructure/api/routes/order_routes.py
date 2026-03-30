@@ -2,10 +2,11 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from src.core.exceptions import PaymentFailedError
+from src.core.enums import Role
+from src.core.exceptions import PaymentFailedError, InvalidStatusTransitionError
 from src.core.repositories import AbstractOrderRepository
-from src.core.services import AbstractPaymentService
-from src.infrastructure.api.dependencies import get_order_repository, get_payment_service
+from src.core.services import AbstractPaymentService, AbstractNotificationService
+from src.infrastructure.api.dependencies import get_order_repository, get_payment_service, get_notification_service, require_roles
 from src.infrastructure.api.schemas import OrderCreate, OrderStatusUpdate, OrderResponse, OrderItemResponse, OrderDetailResponse
 from src.use_cases.order import CreateOrder, GetOrder, GetOrderDetail, ListOrders, UpdateOrderStatus
 
@@ -58,8 +59,13 @@ async def update_order_status(
     order_id: UUID,
     body: OrderStatusUpdate,
     repo: AbstractOrderRepository = Depends(get_order_repository),
+    notification_service: AbstractNotificationService = Depends(get_notification_service),
+    _: Role = Depends(require_roles(Role.MANAGER)),
 ):
-    order = await UpdateOrderStatus(repo).execute(order_id, body.status)
+    try:
+        order = await UpdateOrderStatus(repo, notification_service).execute(order_id, body.status)
+    except InvalidStatusTransitionError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
     return OrderResponse(**vars(order))
