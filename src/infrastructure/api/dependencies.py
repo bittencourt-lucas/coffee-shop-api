@@ -1,10 +1,10 @@
 from fastapi import HTTPException, Request, status
 
 from src.core.enums import Role
-from src.infrastructure.database.connection import database
-from src.infrastructure.database.repositories import ProductRepository, OrderRepository
-from src.core.repositories import AbstractProductRepository, AbstractOrderRepository
+from src.core.repositories import AbstractProductRepository, AbstractOrderRepository, AbstractIdempotencyRepository
 from src.core.services import AbstractPaymentService, AbstractNotificationService
+from src.infrastructure.database.connection import database
+from src.infrastructure.database.repositories import ProductRepository, OrderRepository, IdempotencyRepository
 from src.infrastructure.services import PaymentService, NotificationService
 
 
@@ -22,6 +22,10 @@ def get_product_repository() -> AbstractProductRepository:
 
 def get_order_repository() -> AbstractOrderRepository:
     return OrderRepository(database)
+
+
+def get_idempotency_repository() -> AbstractIdempotencyRepository:
+    return IdempotencyRepository(database)
 
 
 def require_roles(*allowed_roles: Role):

@@ -7,12 +7,13 @@ from httpx import AsyncClient
 from src.core.enums import OrderStatus
 from src.core.exceptions import PaymentFailedError
 from src.infrastructure.api.dependencies import (
+    get_idempotency_repository,
     get_notification_service,
     get_order_repository,
     get_payment_service,
     get_product_repository,
 )
-from src.infrastructure.database.repositories import OrderRepository, ProductRepository
+from src.infrastructure.database.repositories import IdempotencyRepository, OrderRepository, ProductRepository
 from src.infrastructure.database.seed import seed_catalog as real_seed_catalog
 from src.main import app
 
@@ -44,6 +45,7 @@ async def order_client(test_db):
     app.dependency_overrides[get_product_repository] = lambda: ProductRepository(test_db)
     app.dependency_overrides[get_payment_service] = lambda: mock_payment
     app.dependency_overrides[get_notification_service] = lambda: mock_notification
+    app.dependency_overrides[get_idempotency_repository] = lambda: IdempotencyRepository(test_db)
 
     async with _ClientContext(test_db) as c:
         yield c
@@ -62,6 +64,7 @@ async def failing_payment_client(test_db):
     app.dependency_overrides[get_product_repository] = lambda: ProductRepository(test_db)
     app.dependency_overrides[get_payment_service] = lambda: mock_payment
     app.dependency_overrides[get_notification_service] = lambda: mock_notification
+    app.dependency_overrides[get_idempotency_repository] = lambda: IdempotencyRepository(test_db)
 
     async with _ClientContext(test_db) as c:
         yield c
