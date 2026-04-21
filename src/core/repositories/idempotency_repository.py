@@ -19,3 +19,7 @@ class AbstractIdempotencyRepository(ABC):
     @abstractmethod
     async def save(self, key: str, status_code: int, body: dict) -> None:
         pass
+
+    @abstractmethod
+    async def delete_expired(self) -> None:
+        pass
