@@ -103,7 +103,7 @@ async def test_sign_in_returns_token_for_valid_credentials(user_repo):
         result = await SignIn(user_repo).execute(email="user@example.com", password="correct")
 
     assert result == "tok.en.here"
-    mock_token.assert_called_once_with(user.id)
+    mock_token.assert_called_once_with(user.id, user.role)
 
 
 async def test_sign_in_raises_for_wrong_password(user_repo):

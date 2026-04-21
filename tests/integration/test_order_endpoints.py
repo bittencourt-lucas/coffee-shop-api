@@ -4,7 +4,7 @@ from uuid import uuid4
 import pytest
 from httpx import AsyncClient
 
-from src.core.enums import OrderStatus
+from src.core.enums import OrderStatus, Role
 from src.core.exceptions import PaymentFailedError
 from src.infrastructure.api.dependencies import (
     get_idempotency_repository,
@@ -13,11 +13,17 @@ from src.infrastructure.api.dependencies import (
     get_payment_service,
     get_product_repository,
 )
+from src.infrastructure.auth.jwt import create_access_token
 from src.infrastructure.database.repositories import IdempotencyRepository, OrderRepository, ProductRepository
 from src.infrastructure.database.seed import seed_catalog as real_seed_catalog
 from src.main import app
 
 from tests.integration.conftest import _ClientContext
+
+
+def _auth_headers(role: Role) -> dict:
+    token = create_access_token(user_id=uuid4(), role=role)
+    return {"Authorization": f"Bearer {token}"}
 
 
 async def _get_product_ids(client: AsyncClient, count: int = 2) -> list[str]:
@@ -127,7 +133,7 @@ class TestUpdateOrderStatusAccess:
         response = await order_client.patch(
             f"/orders/{order_id}/status",
             json={"status": OrderStatus.PREPARATION.value},
-            headers={"X-Role": "CUSTOMER"},
+            headers=_auth_headers(Role.CUSTOMER),
         )
         assert response.status_code == 403
 
@@ -137,7 +143,7 @@ class TestUpdateOrderStatusAccess:
         response = await order_client.patch(
             f"/orders/{order_id}/status",
             json={"status": OrderStatus.PREPARATION.value},
-            headers={"X-Role": "MANAGER"},
+            headers=_auth_headers(Role.MANAGER),
         )
         assert response.status_code == 200
 
@@ -149,7 +155,7 @@ class TestUpdateOrderStatusTransitions:
         data = (await order_client.patch(
             f"/orders/{order_id}/status",
             json={"status": OrderStatus.PREPARATION.value},
-            headers={"X-Role": "MANAGER"},
+            headers=_auth_headers(Role.MANAGER),
         )).json()
         assert data["status"] == OrderStatus.PREPARATION.value
 
@@ -159,7 +165,7 @@ class TestUpdateOrderStatusTransitions:
         response = await order_client.patch(
             f"/orders/{order_id}/status",
             json={"status": OrderStatus.READY.value},
-            headers={"X-Role": "MANAGER"},
+            headers=_auth_headers(Role.MANAGER),
         )
         assert response.status_code == 422
 
@@ -169,7 +175,7 @@ class TestUpdateOrderStatusTransitions:
         response = await order_client.patch(
             f"/orders/{order_id}/status",
             json={"status": OrderStatus.DELIVERED.value},
-            headers={"X-Role": "MANAGER"},
+            headers=_auth_headers(Role.MANAGER),
         )
         assert response.status_code == 422
 
@@ -180,7 +186,7 @@ class TestUpdateOrderStatusTransitions:
             data = (await order_client.patch(
                 f"/orders/{order_id}/status",
                 json={"status": new_status.value},
-                headers={"X-Role": "MANAGER"},
+                headers=_auth_headers(Role.MANAGER),
             )).json()
             assert data["status"] == new_status.value
 
@@ -188,7 +194,7 @@ class TestUpdateOrderStatusTransitions:
         response = await order_client.patch(
             f"/orders/{uuid4()}/status",
             json={"status": OrderStatus.PREPARATION.value},
-            headers={"X-Role": "MANAGER"},
+            headers=_auth_headers(Role.MANAGER),
         )
         assert response.status_code == 404
 
@@ -198,7 +204,7 @@ class TestUpdateOrderStatusTransitions:
         data = (await order_client.patch(
             f"/orders/{order_id}/status",
             json={"status": OrderStatus.DELIVERED.value},
-            headers={"X-Role": "MANAGER"},
+            headers=_auth_headers(Role.MANAGER),
         )).json()
         assert "Cannot transition" in data["detail"]
 
