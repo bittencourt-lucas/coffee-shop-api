@@ -18,6 +18,8 @@
   - [4.3 Create Order](#43-create-order)
   - [4.4 Get Order Detail](#44-get-order-detail)
   - [4.5 Update Order Status](#45-update-order-status)
+  - [4.6 Create User](#46-create-user)
+  - [4.7 Get User](#47-get-user)
 - [5. Core Domain Model](#5-core-domain-model)
   - [5.1 Entities](#51-entities)
   - [5.2 Order Status State Machine](#52-order-status-state-machine)
@@ -85,19 +87,21 @@ The infrastructure layer depends on use cases, which depend on core. The core la
 ```
 src/
 ├── core/                          # Pure domain logic
-│   ├── entities/                  # Product, Order, OrderDetail, OrderItem, MenuItem, MenuVariation
+│   ├── entities/                  # Product, Order, OrderDetail, OrderItem, MenuItem, MenuVariation, User
 │   ├── enums/                     # OrderStatus, Role
-│   ├── repositories/              # AbstractProductRepository, AbstractOrderRepository
+│   ├── repositories/              # AbstractProductRepository, AbstractOrderRepository,
+│   │                              # AbstractUserRepository, AbstractIdempotencyRepository
 │   ├── services/                  # AbstractPaymentService, AbstractNotificationService
 │   └── exceptions.py              # InvalidProductError, InvalidStatusTransitionError, PaymentFailedError
 │
 ├── use_cases/                     # Application business rules
 │   ├── order/                     # CreateOrder, GetOrderDetail, UpdateOrderStatus
-│   └── product/                   # GetMenu
+│   ├── product/                   # GetMenu
+│   └── user/                      # CreateUser, GetUser
 │
 ├── infrastructure/                # Framework-specific implementations
 │   ├── api/
-│   │   ├── routes/                # FastAPI routers (healthcheck, product, order)
+│   │   ├── routes/                # FastAPI routers (healthcheck, product, order, user)
 │   │   ├── schemas/               # Pydantic request/response models
 │   │   ├── middleware/            # RoleMiddleware, rate_limit (slowapi)
 │   │   └── dependencies.py       # DI wiring and role authorization
@@ -234,6 +238,12 @@ Products are grouped by name and base price. Each variation's `unit_price` is ca
 | **Auth** | Any role |
 | **Rate Limit** | 10 requests/minute per IP |
 
+**Headers**:
+
+| Header | Required | Description |
+|---|---|---|
+| `Idempotency-Key` | No | If provided, the response is cached for 24 hours. A repeated request with the same key returns the cached response without re-processing. |
+
 **Request**:
 ```json
 {
@@ -260,7 +270,7 @@ Products are grouped by name and base price. Each variation's `unit_price` is ca
 | `429` | Rate limit exceeded |
 | `502` | Payment processing failed after retries |
 
-**Flow**: Validate products exist, calculate total, process payment (3 retries), persist order atomically, return response.
+**Flow**: Check idempotency cache (return cached response if hit) → validate products exist → calculate total → process payment (3 retries) → persist order atomically → save to idempotency cache → return response. Only successful (2xx) responses are cached; errors are never stored, allowing the client to retry a failed request with the same key.
 
 ### 4.4 Get Order Detail
 
@@ -324,6 +334,63 @@ Products are grouped by name and base price. Each variation's `unit_price` is ca
 | `404` | Order not found |
 | `422` | Invalid status transition |
 
+### 4.6 Create User
+
+| Property | Value |
+|---|---|
+| **Method** | `POST` |
+| **Path** | `/users/` |
+| **Auth** | Any role |
+| **Rate Limit** | None |
+
+**Request**:
+```json
+{
+  "email": "user@example.com",
+  "role": "CUSTOMER"
+}
+```
+
+**Response** (`201 Created`):
+```json
+{
+  "id": "uuid",
+  "email": "user@example.com",
+  "role": "CUSTOMER"
+}
+```
+
+**Error Responses**:
+
+| Status | Condition |
+|---|---|
+| `422` | Missing or invalid fields |
+| `409` | Email already exists |
+
+### 4.7 Get User
+
+| Property | Value |
+|---|---|
+| **Method** | `GET` |
+| **Path** | `/users/{user_id}` |
+| **Auth** | Any role |
+| **Rate Limit** | None |
+
+**Response** (`200 OK`):
+```json
+{
+  "id": "uuid",
+  "email": "user@example.com",
+  "role": "CUSTOMER"
+}
+```
+
+**Error Responses**:
+
+| Status | Condition |
+|---|---|
+| `404` | User not found |
+
 ---
 
 ## 5. Core Domain Model
@@ -338,6 +405,7 @@ All entities are Python dataclasses defined in `src/core/entities/`. They have n
 - **OrderItem**: `id`, `name`, `variation`, `unit_price`
 - **MenuItem**: `name`, `base_price`, `variations` (list of `MenuVariation`)
 - **MenuVariation**: `id`, `variation`, `unit_price`
+- **User**: `id`, `email`, `role`
 
 ### 5.2 Order Status State Machine
 
@@ -376,6 +444,8 @@ Abstract interfaces are defined in `src/core/repositories/` using Python ABCs. C
 
 - `AbstractProductRepository` defines `list_all()` and `get_by_ids()`
 - `AbstractOrderRepository` defines `create()`, `get_by_id()`, `get_detail_by_id()`, and `update_status()`
+- `AbstractUserRepository` defines `create()`, `get_by_id()`, and `list_all()`
+- `AbstractIdempotencyRepository` defines `get(key)` and `save(key, status_code, body)` — used exclusively at the API layer, not inside use cases
 
 The same approach applies to external services (`AbstractPaymentService`, `AbstractNotificationService`). This enables straightforward testing — tests inject mocks or stubs without touching the database or external APIs.
 
@@ -387,6 +457,8 @@ Each use case is a single-responsibility class with an `execute()` method:
 - `GetOrderDetail.execute(order_id)` — retrieves full order with item details
 - `UpdateOrderStatus.execute(order_id, new_status)` — validates transition, updates, notifies
 - `GetMenu.execute()` — fetches and groups products into menu items
+- `CreateUser.execute(email, role)` — creates a user with a new UUID
+- `GetUser.execute(user_id)` — retrieves a user by ID or returns `None`
 
 Use cases receive their dependencies (repositories, services) through their constructor, making them easy to instantiate in route handlers via FastAPI's `Depends()`.
 
@@ -394,7 +466,7 @@ Use cases receive their dependencies (repositories, services) through their cons
 
 All wiring happens in `src/infrastructure/api/dependencies.py`. FastAPI's `Depends()` system provides:
 
-- **Repositories**: `get_product_repository()`, `get_order_repository()` — instantiated with the database connection
+- **Repositories**: `get_product_repository()`, `get_order_repository()`, `get_user_repository()`, `get_idempotency_repository()` — instantiated with the database connection
 - **Services**: `get_payment_service()`, `get_notification_service()` — instantiated as singletons per request
 - **Authorization**: `require_roles(*allowed_roles)` — returns a dependency that checks `request.state.role` and raises `403` if unauthorized
 
@@ -499,7 +571,7 @@ Unauthorized access returns `403 Forbidden` with a message indicating the caller
 
 ### 9.1 Schema
 
-Three tables:
+Five tables:
 
 **`products`**
 
@@ -527,6 +599,25 @@ Three tables:
 | `order_id` | String (UUID) | Foreign Key → orders.id |
 | `product_id` | String (UUID) | Foreign Key → products.id |
 
+**`users`**
+
+| Column | Type | Constraints |
+|---|---|---|
+| `id` | String (UUID) | Primary Key |
+| `email` | String | NOT NULL, UNIQUE |
+| `role` | String | NOT NULL |
+
+**`idempotency_keys`**
+
+| Column | Type | Constraints |
+|---|---|---|
+| `key` | String | Primary Key |
+| `status_code` | Integer | NOT NULL |
+| `response_body` | Text (JSON) | NOT NULL |
+| `created_at` | DateTime | NOT NULL, server default: now() |
+
+Idempotency entries older than 24 hours are treated as expired and ignored on lookup (no background purge — expired rows are simply skipped by the TTL check in `IdempotencyRepository.get()`).
+
 UUIDs are stored as strings because SQLite has no native UUID type. The repository layer handles conversion between `str` and `uuid.UUID`.
 
 ### 9.2 Migrations
@@ -536,6 +627,8 @@ Managed by Alembic. Migration history:
 1. **Initial schema** — creates products, orders, and order_products tables
 2. **Remove users table** — drops an earlier user-related table that was superseded by header-based role checks
 3. **Add created_at** — adds the `created_at` timestamp column to orders
+4. **Add users table** — creates the users table with `id`, `email` (unique), and `role`
+5. **Add idempotency_keys table** — creates the idempotency_keys table with `key`, `status_code`, `response_body`, and `created_at`
 
 Run migrations with: `alembic upgrade head`
 
@@ -563,10 +656,13 @@ Seeding is idempotent — if the table already has data, it is skipped entirely.
 Client
   │
   ▼
-POST /orders/ { product_ids: [...] }
+POST /orders/ { product_ids: [...] }  [Idempotency-Key: <key>]
   │
   ├─ RoleMiddleware: extract X-Role (default: CUSTOMER)
   ├─ Rate Limiter: check 10/min per IP
+  │
+  ├─ 0. IdempotencyRepository.get(key) ──► Check cache (if key present)
+  │     └─ Cache hit → return cached 201 response immediately (no further processing)
   │
   ▼
 CreateOrder.execute(product_ids)
@@ -583,6 +679,8 @@ CreateOrder.execute(product_ids)
   ├─ 4. OrderRepository.create(order) ──► Atomic DB transaction
   │     ├─ INSERT into orders
   │     └─ INSERT into order_products (one row per product)
+  │
+  ├─ 5. IdempotencyRepository.save(key, 201, body) ──► Cache response (if key present)
   │
   ▼
 201 Created { id, status: "WAITING", total_price, product_ids }
@@ -637,8 +735,6 @@ The following choices were made intentionally to keep the project simple and foc
 
 **Notification delivery is not guaranteed**: Notifications are fire-and-forget via `asyncio.create_task()`. If the notification service is down or the application process crashes after updating the status but before the notification task completes, the notification is lost. Production should use a message queue or transactional outbox pattern.
 
-**No idempotency on order creation**: If a client retries a `POST /orders/` request (e.g., due to a network timeout after the server processed it), a duplicate order will be created and payment will be charged again. Production should support idempotency keys to prevent duplicate processing.
-
 **Float arithmetic for prices**: Prices are stored and calculated as Python floats, which can introduce floating-point precision errors (e.g., `0.1 + 0.2 = 0.30000000000000004`). The use of `round(..., 2)` mitigates this in most cases, but production financial calculations should use `Decimal` types throughout.
 
 **No pagination on menu or order list**: The menu endpoint returns all products in a single response. This is fine for a small catalog (13 items), but would not scale to hundreds or thousands of products. There is no order listing endpoint at all.
@@ -658,10 +754,10 @@ If this project were to go live, the following changes would need to be implemen
 | **Database** | SQLite (file-based) | PostgreSQL with connection pooling |
 | **Authentication** | Trusted `X-Role` header | JWT/OAuth2 with token validation |
 | **Authorization** | Role in header | Claims from signed tokens; ownership checks |
-| **User identity** | None | User model; orders tied to user IDs |
+| **User identity** | Email + role stored; orders not yet associated | Associate orders with user IDs; scope access by owner |
 | **Payment retries** | Immediate, 3 attempts | Exponential backoff with jitter; circuit breaker |
 | **Notifications** | Fire-and-forget | Message queue (RabbitMQ/SQS) or outbox pattern |
-| **Idempotency** | None | Idempotency keys on order creation |
+| **Idempotency** | `Idempotency-Key` header on `POST /orders/`; 24h TTL | Expand to other mutating endpoints; add periodic cleanup of expired keys |
 | **Price precision** | Python `float` | `Decimal` types end-to-end |
 | **CORS** | Hardcoded localhost | Configurable via environment variables |
 | **Rate limiting** | Per-IP only | Per-user or per-API-key |

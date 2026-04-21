@@ -20,6 +20,12 @@ All requests require an `X-Role` header. Valid values: `CUSTOMER`, `MANAGER`. De
 | `POST`  | `/orders/`                | Any      | 10/min     | Create an order and process payment              |
 | `GET`   | `/orders/{id}`            | Any      | —          | Get full order details                           |
 | `PATCH` | `/orders/{id}/status`     | MANAGER  | —          | Advance order status                             |
+| `POST`  | `/users/`                 | Any      | —          | Create a user                                    |
+| `GET`   | `/users/{id}`             | Any      | —          | Get a user by ID                                 |
+
+### Idempotency
+
+`POST /orders/` supports the `Idempotency-Key` request header. Sending the same key on a repeated request returns the original cached response without re-charging payment or creating a duplicate order. Keys expire after 24 hours. Requests without the header are processed normally.
 
 ### Order Status Flow
 
@@ -125,7 +131,7 @@ pytest tests/ --cov=src --cov-report=term-missing
 
 ## Test Coverage
 
-71 tests across unit and integration suites.
+93 tests across unit and integration suites.
 
 ```
 Name                                                             Stmts   Miss  Cover
