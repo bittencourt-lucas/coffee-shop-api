@@ -1,5 +1,5 @@
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from httpx import AsyncClient
@@ -12,9 +12,15 @@ from src.infrastructure.api.dependencies import (
     get_order_repository,
     get_payment_service,
     get_product_repository,
+    get_user_repository,
 )
 from src.infrastructure.auth.jwt import create_access_token
-from src.infrastructure.database.repositories import IdempotencyRepository, OrderRepository, ProductRepository
+from src.infrastructure.database.repositories import (
+    IdempotencyRepository,
+    OrderRepository,
+    ProductRepository,
+    UserRepository,
+)
 from src.infrastructure.database.seed import seed_catalog as real_seed_catalog
 from src.main import app
 
@@ -24,8 +30,8 @@ _DEFAULT_CUSTOMER_ID = uuid4()
 _DEFAULT_MANAGER_ID = uuid4()
 
 
-def _auth_headers(role: Role) -> dict:
-    uid = _DEFAULT_CUSTOMER_ID if role == Role.CUSTOMER else _DEFAULT_MANAGER_ID
+def _auth_headers(role: Role, user_id: UUID | None = None) -> dict:
+    uid = user_id or (_DEFAULT_CUSTOMER_ID if role == Role.CUSTOMER else _DEFAULT_MANAGER_ID)
     token = create_access_token(user_id=uid, role=role)
     return {"Authorization": f"Bearer {token}"}
 
@@ -56,6 +62,7 @@ async def order_client(test_db):
     app.dependency_overrides[get_payment_service] = lambda: mock_payment
     app.dependency_overrides[get_notification_service] = lambda: mock_notification
     app.dependency_overrides[get_idempotency_repository] = lambda: IdempotencyRepository(test_db)
+    app.dependency_overrides[get_user_repository] = lambda: UserRepository(test_db)
 
     async with _ClientContext(test_db) as c:
         yield c
@@ -75,6 +82,7 @@ async def failing_payment_client(test_db):
     app.dependency_overrides[get_payment_service] = lambda: mock_payment
     app.dependency_overrides[get_notification_service] = lambda: mock_notification
     app.dependency_overrides[get_idempotency_repository] = lambda: IdempotencyRepository(test_db)
+    app.dependency_overrides[get_user_repository] = lambda: UserRepository(test_db)
 
     async with _ClientContext(test_db) as c:
         yield c
@@ -140,6 +148,14 @@ class TestCreateOrderResponse:
             "/orders/", json={"product_ids": product_ids}, headers=_auth_headers(Role.CUSTOMER)
         )).json()
         assert set(data["product_ids"]) == set(product_ids)
+
+    async def test_response_contains_user_id(self, order_client: AsyncClient):
+        product_ids = await _get_product_ids(order_client)
+        data = (await order_client.post(
+            "/orders/", json={"product_ids": product_ids}, headers=_auth_headers(Role.CUSTOMER)
+        )).json()
+        assert "user_id" in data
+        assert data["user_id"] == str(_DEFAULT_CUSTOMER_ID)
 
 
 class TestCreateOrderPaymentError:
@@ -261,9 +277,7 @@ class TestUpdateOrderStatusTransitions:
 
 class TestGetOrderDetail:
     async def test_returns_404_for_unknown_order(self, order_client: AsyncClient):
-        response = await order_client.get(
-            f"/orders/{uuid4()}", headers=_auth_headers(Role.CUSTOMER)
-        )
+        response = await order_client.get(f"/orders/{uuid4()}", headers=_auth_headers(Role.CUSTOMER))
         assert response.status_code == 404
 
     async def test_returns_401_without_token(self, order_client: AsyncClient):
@@ -274,12 +288,29 @@ class TestGetOrderDetail:
         response = await order_client.get(f"/orders/{order_id}")
         assert response.status_code == 401
 
-    async def test_returns_200_for_existing_order(self, order_client: AsyncClient):
+    async def test_returns_200_for_own_order(self, order_client: AsyncClient):
         product_ids = await _get_product_ids(order_client)
         order_id = (await order_client.post(
             "/orders/", json={"product_ids": product_ids}, headers=_auth_headers(Role.CUSTOMER)
         )).json()["id"]
         response = await order_client.get(f"/orders/{order_id}", headers=_auth_headers(Role.CUSTOMER))
+        assert response.status_code == 200
+
+    async def test_returns_404_for_other_users_order(self, order_client: AsyncClient):
+        product_ids = await _get_product_ids(order_client)
+        order_id = (await order_client.post(
+            "/orders/", json={"product_ids": product_ids}, headers=_auth_headers(Role.CUSTOMER)
+        )).json()["id"]
+        other_customer = _auth_headers(Role.CUSTOMER, user_id=uuid4())
+        response = await order_client.get(f"/orders/{order_id}", headers=other_customer)
+        assert response.status_code == 404
+
+    async def test_manager_can_view_any_order(self, order_client: AsyncClient):
+        product_ids = await _get_product_ids(order_client)
+        order_id = (await order_client.post(
+            "/orders/", json={"product_ids": product_ids}, headers=_auth_headers(Role.CUSTOMER)
+        )).json()["id"]
+        response = await order_client.get(f"/orders/{order_id}", headers=_auth_headers(Role.MANAGER))
         assert response.status_code == 200
 
     async def test_response_contains_required_fields(self, order_client: AsyncClient):
@@ -299,9 +330,7 @@ class TestGetOrderDetail:
         created = (await order_client.post(
             "/orders/", json={"product_ids": product_ids}, headers=_auth_headers(Role.CUSTOMER)
         )).json()
-        data = (await order_client.get(
-            f"/orders/{created['id']}", headers=_auth_headers(Role.CUSTOMER)
-        )).json()
+        data = (await order_client.get(f"/orders/{created['id']}", headers=_auth_headers(Role.CUSTOMER))).json()
         assert data["id"] == created["id"]
         assert data["status"] == "WAITING"
         assert data["total_price"] == created["total_price"]

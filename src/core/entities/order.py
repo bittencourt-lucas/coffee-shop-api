@@ -9,4 +9,5 @@ class Order:
     id: UUID
     status: OrderStatus
     total_price: float
+    user_id: UUID
     product_ids: list[UUID] = field(default_factory=list)

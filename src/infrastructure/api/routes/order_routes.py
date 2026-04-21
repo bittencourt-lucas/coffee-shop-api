@@ -36,7 +36,7 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 async def create_order(
     request: Request,
     body: OrderCreate,
-    _: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
     order_repo: AbstractOrderRepository = Depends(get_order_repository),
     product_repo: AbstractProductRepository = Depends(get_product_repository),
     payment_service: AbstractPaymentService = Depends(get_payment_service),
@@ -51,6 +51,7 @@ async def create_order(
     try:
         order = await CreateOrder(order_repo, product_repo, payment_service).execute(
             product_ids=body.product_ids,
+            user_id=current_user.user_id,
         )
     except InvalidProductError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
@@ -68,10 +69,11 @@ async def create_order(
 @router.get("/{order_id}", response_model=OrderDetailResponse)
 async def get_order(
     order_id: UUID,
-    _: TokenData = Depends(get_current_user),
+    current_user: TokenData = Depends(get_current_user),
     repo: AbstractOrderRepository = Depends(get_order_repository),
 ):
-    order = await GetOrderDetail(repo).execute(order_id)
+    user_id = None if current_user.role == Role.MANAGER else current_user.user_id
+    order = await GetOrderDetail(repo).execute(order_id, user_id=user_id)
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
     return OrderDetailResponse(
