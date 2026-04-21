@@ -19,7 +19,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install flake8
+        run: pip install ".[dev]"
 
       - name: Run flake8
         run: flake8 src/ tests/
@@ -37,7 +37,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install "fastapi[standard]" "databases[aiosqlite]" alembic pytest pytest-asyncio httpx slowapi
+        run: pip install ".[dev]"
 
       - name: Run tests
         run: pytest tests/ -v
