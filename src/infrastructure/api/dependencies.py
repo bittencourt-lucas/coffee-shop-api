@@ -6,6 +6,7 @@ from src.core.repositories import (
     AbstractOrderRepository,
     AbstractUserRepository,
     AbstractIdempotencyRepository,
+    AbstractRevokedTokenRepository,
 )
 from src.core.services import AbstractPaymentService, AbstractNotificationService
 from src.infrastructure.database.connection import database
@@ -14,6 +15,7 @@ from src.infrastructure.database.repositories import (
     OrderRepository,
     UserRepository,
     IdempotencyRepository,
+    RevokedTokenRepository,
 )
 from src.infrastructure.services import PaymentService, NotificationService
 
@@ -40,6 +42,10 @@ def get_user_repository() -> AbstractUserRepository:
 
 def get_idempotency_repository() -> AbstractIdempotencyRepository:
     return IdempotencyRepository(database)
+
+
+def get_revoked_token_repository() -> AbstractRevokedTokenRepository:
+    return RevokedTokenRepository(database)
 
 
 def require_roles(*allowed_roles: Role):
