@@ -1,12 +1,15 @@
+from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 
 from src.core.enums import Role
 from src.core.exceptions import InvalidProductError, InvalidStatusTransitionError, PaymentFailedError
-from src.core.repositories import AbstractOrderRepository, AbstractProductRepository
+from src.core.repositories import AbstractOrderRepository, AbstractProductRepository, AbstractIdempotencyRepository
 from src.core.services import AbstractNotificationService, AbstractPaymentService
 from src.infrastructure.api.dependencies import (
+    get_idempotency_repository,
     get_notification_service,
     get_order_repository,
     get_payment_service,
@@ -34,7 +37,14 @@ async def create_order(
     order_repo: AbstractOrderRepository = Depends(get_order_repository),
     product_repo: AbstractProductRepository = Depends(get_product_repository),
     payment_service: AbstractPaymentService = Depends(get_payment_service),
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    idempotency_repo: AbstractIdempotencyRepository = Depends(get_idempotency_repository),
 ):
+    if idempotency_key:
+        cached = await idempotency_repo.get(idempotency_key)
+        if cached:
+            return JSONResponse(status_code=cached.status_code, content=cached.body)
+
     try:
         order = await CreateOrder(order_repo, product_repo, payment_service).execute(
             product_ids=body.product_ids,
@@ -43,7 +53,13 @@ async def create_order(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
     except PaymentFailedError:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Payment could not be processed")
-    return OrderResponse(**vars(order))
+
+    response = OrderResponse(**vars(order))
+
+    if idempotency_key:
+        await idempotency_repo.save(idempotency_key, status.HTTP_201_CREATED, response.model_dump(mode="json"))
+
+    return response
 
 
 @router.get("/{order_id}", response_model=OrderDetailResponse)

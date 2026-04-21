@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(planning-with-files:planning-with-files)",
+      "Bash(./venv/Scripts/python *)",
+      "Bash(python *)"
+    ]
+  }
+}

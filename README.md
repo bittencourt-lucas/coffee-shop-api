@@ -1,6 +1,6 @@
 # Coffee Shop API
 
-A RESTful API for a coffee shop built with **FastAPI** and **Clean Architecture**. Handles the menu, order creation, order tracking, and status management with role-based access control and payment/notification integrations.
+A RESTful API for a coffee shop built with **FastAPI** and **Clean Architecture**. Handles the menu, order creation, order tracking, and status management with JWT-based authentication and role-based access control.
 
 ## Architecture
 
@@ -8,18 +8,34 @@ The project follows Clean Architecture with a Repository Pattern, organized into
 
 - **`core/`** — Pure Python: entities, enums, abstract repository interfaces, abstract service interfaces, and exceptions. No framework dependencies.
 - **`use_cases/`** — Application logic. Depends only on `core/`. Each use case is a single class with an `execute` method.
-- **`infrastructure/`** — Everything framework-specific: SQLAlchemy table models, concrete repository implementations, FastAPI routes, Pydantic schemas, and external service clients.
+- **`infrastructure/`** — Everything framework-specific: SQLAlchemy table models, concrete repository implementations, FastAPI routes, Pydantic schemas, external service clients, and auth utilities.
+
+## Authentication
+
+Most endpoints are publicly accessible. Role-protected endpoints (e.g. `PATCH /orders/{id}/status`) require a valid JWT in the `Authorization` header:
+
+```
+Authorization: Bearer <token>
+```
+
+Obtain a token by signing in via `POST /auth/sign-in`. The token encodes the user's role — the middleware extracts it from the token, so no database lookup is needed per request. Requests without a token default to the `CUSTOMER` role. A present but invalid or expired token returns `401`.
 
 ## Endpoints
 
-All requests require an `X-Role` header. Valid values: `CUSTOMER`, `MANAGER`. Defaults to `CUSTOMER` if omitted.
+| Method  | Path                      | Auth Required  | Rate Limit | Description                                       |
+|---------|---------------------------|----------------|------------|---------------------------------------------------|
+| `GET`   | `/healthcheck`            | No             | —          | Liveness probe                                    |
+| `GET`   | `/menu`                   | No             | —          | List all products grouped by name with variations |
+| `POST`  | `/users/`                 | No             | —          | Register a new user                               |
+| `GET`   | `/users/{id}`             | No             | —          | Get a user by ID                                  |
+| `POST`  | `/auth/sign-in`           | No             | —          | Authenticate and receive a JWT                    |
+| `POST`  | `/orders/`                | No             | 10/min     | Create an order and process payment               |
+| `GET`   | `/orders/{id}`            | No             | —          | Get full order details                            |
+| `PATCH` | `/orders/{id}/status`     | MANAGER token  | —          | Advance order status                              |
 
-| Method  | Path                      | Role     | Rate Limit | Description                                      |
-|---------|---------------------------|----------|------------|--------------------------------------------------|
-| `GET`   | `/menu`                   | Any      | —          | List all products grouped by name with variations |
-| `POST`  | `/orders/`                | Any      | 10/min     | Create an order and process payment              |
-| `GET`   | `/orders/{id}`            | Any      | —          | Get full order details                           |
-| `PATCH` | `/orders/{id}/status`     | MANAGER  | —          | Advance order status                             |
+### Idempotency
+
+`POST /orders/` and `POST /users/` support the `Idempotency-Key` request header. Sending the same key on a repeated request returns the original cached response without re-processing. Keys expire after 24 hours.
 
 ### Order Status Flow
 
@@ -38,12 +54,14 @@ Any out-of-sequence update returns `422`.
 
 ### Security
 
+- **JWT authentication** — Roles are derived from signed HS256 tokens. The secret key and expiration are configurable via environment variables.
+- **Password hashing** — User passwords are hashed with bcrypt before storage. Plaintext passwords are never persisted.
 - **CORS** — Restricted to explicit allowed origins, methods, and headers via `CORSMiddleware`.
 - **Rate limiting** — `POST /orders/` is limited to 10 requests/minute per IP using `slowapi`. Exceeding the limit returns `429 Too Many Requests`.
 - **Input validation** — `product_ids` is capped at 50 items per order to prevent abuse.
 - **Error sanitization** — External service errors are logged server-side only; clients receive generic error messages.
-- **Structured logging** — Payment and notification services use Python `logging` instead of `print`.
-- **Configurable secrets** — All external URLs and the database connection string are loaded from environment variables via `pydantic-settings`, not hardcoded.
+- **Structured logging** — Services use Python `logging` instead of `print`.
+- **Configurable secrets** — All external URLs, the database connection string, and the JWT secret key are loaded from environment variables via `pydantic-settings`.
 - **Explicit timeouts** — All outbound HTTP calls use a 10-second timeout.
 
 ---
@@ -64,7 +82,7 @@ source venv/bin/activate        # macOS/Linux
 venv\Scripts\activate           # Windows
 
 # Install dependencies
-pip install fastapi[standard] databases[aiosqlite] alembic httpx pydantic-settings slowapi
+pip install fastapi[standard] databases[aiosqlite] alembic httpx pydantic-settings slowapi "python-jose[cryptography]" bcrypt
 
 # (Optional) Copy and edit the environment file
 cp .env.example .env
@@ -74,11 +92,16 @@ cp .env.example .env
 
 All settings can be overridden via environment variables (prefixed with `COFFEE_SHOP_`):
 
-| Variable                       | Default                                          | Description            |
-|--------------------------------|--------------------------------------------------|------------------------|
-| `COFFEE_SHOP_DATABASE_URL`     | `sqlite+aiosqlite:///./coffee_shop.db`           | Database connection    |
-| `COFFEE_SHOP_PAYMENT_URL`      | `https://challenge.trio.dev/api/v1/payment`      | Payment service URL    |
-| `COFFEE_SHOP_NOTIFICATION_URL` | `https://challenge.trio.dev/api/v1/notification`  | Notification service URL |
+| Variable                              | Default                                          | Description              |
+|---------------------------------------|--------------------------------------------------|--------------------------|
+| `COFFEE_SHOP_DATABASE_URL`            | `sqlite+aiosqlite:///./coffee_shop.db`           | Database connection      |
+| `COFFEE_SHOP_PAYMENT_URL`             | `https://challenge.trio.dev/api/v1/payment`      | Payment service URL      |
+| `COFFEE_SHOP_NOTIFICATION_URL`        | `https://challenge.trio.dev/api/v1/notification` | Notification service URL |
+| `COFFEE_SHOP_JWT_SECRET_KEY`          | `change-me-in-production`                        | JWT signing secret       |
+| `COFFEE_SHOP_JWT_ALGORITHM`           | `HS256`                                          | JWT signing algorithm    |
+| `COFFEE_SHOP_JWT_EXPIRATION_MINUTES`  | `60`                                             | Token lifetime (minutes) |
+
+> **Important**: Always override `COFFEE_SHOP_JWT_SECRET_KEY` with a strong random value in any non-local environment.
 
 ### Database
 
@@ -125,25 +148,30 @@ pytest tests/ --cov=src --cov-report=term-missing
 
 ## Test Coverage
 
-71 tests across unit and integration suites.
+119 tests across unit and integration suites.
 
 ```
 Name                                                             Stmts   Miss  Cover
 ------------------------------------------------------------------------------------
-src\core\entities\*                                                 43      0   100%
+src\core\entities\*                                                 50      0   100%
 src\core\enums\*                                                    13      0   100%
-src\core\exceptions.py                                               7      0   100%
+src\core\exceptions.py                                               9      0   100%
 src\core\services\*                                                  7      0   100%
 src\infrastructure\api\routes\order_routes.py                       32      0   100%
+src\infrastructure\api\routes\user_routes.py                        22      0   100%
+src\infrastructure\api\routes\auth_routes.py                        13      0   100%
 src\infrastructure\api\routes\product_routes.py                     11      0   100%
-src\infrastructure\api\schemas\*                                    36      0   100%
-src\infrastructure\database\models\*                                10      0   100%
+src\infrastructure\api\schemas\*                                    46      0   100%
+src\infrastructure\auth\jwt.py                                       8      0   100%
+src\infrastructure\auth\password.py                                  7      0   100%
+src\infrastructure\database\models\*                                11      0   100%
 src\infrastructure\database\repositories\order_repository.py        41      0   100%
+src\infrastructure\database\repositories\user_repository.py         28      0   100%
 src\infrastructure\database\seed.py                                 11      0   100%
 src\infrastructure\services\payment_service.py                      21      0   100%
-src\use_cases\*                                                     68      0   100%
+src\use_cases\*                                                     80      0   100%
 ------------------------------------------------------------------------------------
-TOTAL                                                              450     38    92%
+TOTAL                                                              510     38    93%
 ```
 
-Overall coverage: **92%**. Uncovered lines are limited to abstract method stubs, the app lifespan startup/shutdown hooks, and the notification service's live HTTP path (intentionally not exercised in tests, as the service is mocked via dependency injection).
+Overall coverage: **93%**. Uncovered lines are limited to abstract method stubs, the app lifespan startup/shutdown hooks, and the notification service's live HTTP path (intentionally not exercised in tests, as the service is mocked via dependency injection).
