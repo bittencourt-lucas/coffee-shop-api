@@ -14,5 +14,9 @@ class AbstractUserRepository(ABC):
         pass
 
     @abstractmethod
+    async def get_by_email(self, email: str) -> User | None:
+        pass
+
+    @abstractmethod
     async def list_all(self) -> list[User]:
         pass

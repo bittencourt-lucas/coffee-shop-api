@@ -18,6 +18,7 @@ class UserRepository(AbstractUserRepository):
                 id=str(user.id),
                 email=user.email,
                 role=user.role.value,
+                password_hash=user.password_hash,
             )
         )
         return user
@@ -26,9 +27,13 @@ class UserRepository(AbstractUserRepository):
         row = await self._db.fetch_one(
             users_table.select().where(users_table.c.id == str(user_id))
         )
-        if not row:
-            return None
-        return self._to_entity(row)
+        return self._to_entity(row) if row else None
+
+    async def get_by_email(self, email: str) -> User | None:
+        row = await self._db.fetch_one(
+            users_table.select().where(users_table.c.email == email)
+        )
+        return self._to_entity(row) if row else None
 
     async def list_all(self) -> list[User]:
         rows = await self._db.fetch_all(users_table.select())
@@ -40,4 +45,5 @@ class UserRepository(AbstractUserRepository):
             id=UUID(row["id"]),
             email=row["email"],
             role=Role(row["role"]),
+            password_hash=row["password_hash"],
         )

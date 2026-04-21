@@ -9,3 +9,4 @@ class User:
     id: uuid.UUID
     email: str
     role: Role
+    password_hash: str
