@@ -2,7 +2,9 @@ from uuid import uuid4
 
 import pytest
 
+from src.core.enums import Role
 from src.infrastructure.api.dependencies import get_idempotency_repository, get_user_repository
+from src.infrastructure.auth.jwt import create_access_token
 from src.infrastructure.database.repositories import IdempotencyRepository, UserRepository
 from src.main import app
 from tests.integration.conftest import _ClientContext
@@ -15,6 +17,11 @@ async def user_client(test_db):
 
     async with _ClientContext(test_db) as c:
         yield c
+
+
+def _auth_headers() -> dict:
+    token = create_access_token(user_id=uuid4(), role=Role.CUSTOMER)
+    return {"Authorization": f"Bearer {token}"}
 
 
 _USER_PAYLOAD = {"email": "alice@example.com", "password": "secure123", "role": "CUSTOMER"}
@@ -57,18 +64,23 @@ class TestCreateUserResponse:
 class TestGetUser:
     async def test_returns_200_for_existing_user(self, user_client):
         user_id = (await user_client.post("/users/", json=_USER_PAYLOAD)).json()["id"]
-        response = await user_client.get(f"/users/{user_id}")
+        response = await user_client.get(f"/users/{user_id}", headers=_auth_headers())
         assert response.status_code == 200
 
     async def test_returns_correct_user(self, user_client):
         user_id = (await user_client.post("/users/", json=_USER_PAYLOAD)).json()["id"]
-        data = (await user_client.get(f"/users/{user_id}")).json()
+        data = (await user_client.get(f"/users/{user_id}", headers=_auth_headers())).json()
         assert data["id"] == user_id
         assert data["email"] == _USER_PAYLOAD["email"]
 
     async def test_returns_404_for_unknown_id(self, user_client):
-        response = await user_client.get(f"/users/{uuid4()}")
+        response = await user_client.get(f"/users/{uuid4()}", headers=_auth_headers())
         assert response.status_code == 404
+
+    async def test_returns_401_without_token(self, user_client):
+        user_id = (await user_client.post("/users/", json=_USER_PAYLOAD)).json()["id"]
+        response = await user_client.get(f"/users/{user_id}")
+        assert response.status_code == 401
 
 
 class TestCreateUserIdempotency:

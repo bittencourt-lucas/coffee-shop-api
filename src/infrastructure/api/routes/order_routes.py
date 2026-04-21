@@ -9,6 +9,7 @@ from src.core.exceptions import InvalidProductError, InvalidStatusTransitionErro
 from src.core.repositories import AbstractOrderRepository, AbstractProductRepository, AbstractIdempotencyRepository
 from src.core.services import AbstractNotificationService, AbstractPaymentService
 from src.infrastructure.api.dependencies import (
+    get_current_user,
     get_idempotency_repository,
     get_notification_service,
     get_order_repository,
@@ -16,6 +17,7 @@ from src.infrastructure.api.dependencies import (
     get_product_repository,
     require_roles,
 )
+from src.infrastructure.auth.jwt import TokenData
 from src.infrastructure.api.schemas import (
     OrderCreate,
     OrderDetailResponse,
@@ -34,6 +36,7 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 async def create_order(
     request: Request,
     body: OrderCreate,
+    _: TokenData = Depends(get_current_user),
     order_repo: AbstractOrderRepository = Depends(get_order_repository),
     product_repo: AbstractProductRepository = Depends(get_product_repository),
     payment_service: AbstractPaymentService = Depends(get_payment_service),
@@ -65,6 +68,7 @@ async def create_order(
 @router.get("/{order_id}", response_model=OrderDetailResponse)
 async def get_order(
     order_id: UUID,
+    _: TokenData = Depends(get_current_user),
     repo: AbstractOrderRepository = Depends(get_order_repository),
 ):
     order = await GetOrderDetail(repo).execute(order_id)
@@ -85,7 +89,7 @@ async def update_order_status(
     body: OrderStatusUpdate,
     repo: AbstractOrderRepository = Depends(get_order_repository),
     notification_service: AbstractNotificationService = Depends(get_notification_service),
-    _: Role = Depends(require_roles(Role.MANAGER)),
+    _: TokenData = Depends(require_roles(Role.MANAGER)),
 ):
     try:
         order = await UpdateOrderStatus(repo, notification_service).execute(order_id, body.status)

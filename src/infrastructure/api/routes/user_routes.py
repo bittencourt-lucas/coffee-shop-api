@@ -5,8 +5,9 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import JSONResponse
 
 from src.core.repositories import AbstractIdempotencyRepository, AbstractUserRepository
-from src.infrastructure.api.dependencies import get_idempotency_repository, get_user_repository
+from src.infrastructure.api.dependencies import get_current_user, get_idempotency_repository, get_user_repository
 from src.infrastructure.api.schemas import UserCreate, UserResponse
+from src.infrastructure.auth.jwt import TokenData
 from src.use_cases.user import CreateUser, GetUser
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -50,6 +51,7 @@ async def create_user(
 async def get_user(
     user_id: UUID,
     repo: AbstractUserRepository = Depends(get_user_repository),
+    _: TokenData = Depends(get_current_user),
 ):
     user = await GetUser(repo).execute(user_id)
     if not user:
