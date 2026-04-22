@@ -20,8 +20,9 @@
   - [4.5 Sign In](#45-sign-in)
   - [4.6 Sign Out](#46-sign-out)
   - [4.7 Create Order](#47-create-order)
-  - [4.8 Get Order Detail](#48-get-order-detail)
-  - [4.9 Update Order Status](#49-update-order-status)
+  - [4.8 List Orders](#48-list-orders)
+  - [4.9 Get Order Detail](#49-get-order-detail)
+  - [4.10 Update Order Status](#410-update-order-status)
 - [5. Core Domain Model](#5-core-domain-model)
   - [5.1 Entities](#51-entities)
   - [5.2 Order Status State Machine](#52-order-status-state-machine)
@@ -105,7 +106,7 @@ src/
 │                                  # PaymentFailedError, InvalidCredentialsError, DuplicateEmailError
 │
 ├── use_cases/                     # Application business rules
-│   ├── order/                     # CreateOrder, GetOrderDetail, UpdateOrderStatus
+│   ├── order/                     # CreateOrder, GetOrderDetail, ListOrders, UpdateOrderStatus
 │   ├── product/                   # GetMenu
 │   └── user/                      # CreateUser, GetUser, SignIn
 │
@@ -123,7 +124,7 @@ src/
 │   │   ├── repositories/          # Concrete repository implementations
 │   │   ├── connection.py          # Database instance and metadata
 │   │   └── seed.py                # Product catalog seeding
-│   ├── services/                  # PaymentService (with retries), RedisNotificationService (stream publisher)
+│   ├── services/                  # PaymentService (retries + circuit breaker), RedisNotificationService (stream publisher)
 │   ├── tasks/
 │   │   ├── purge_expired.py       # Background loop: deletes expired idempotency keys and revoked tokens
 │   │   └── notification_worker.py # Background consumer: reads notifications stream, delivers via HTTP with retry
@@ -216,6 +217,7 @@ If the application starts with the default `jwt_secret_key` value, a `CRITICAL` 
 | `python-jose[cryptography]` | JWT encoding/decoding | Widely used, supports multiple algorithms; `[cryptography]` extra enables RS256/ES256 for future upgrades |
 | `bcrypt` | Password hashing | Industry-standard adaptive hash function; resistant to brute-force via cost factor |
 | `redis[asyncio]` | Notification message queue | Redis Streams provide durable, ACK-based delivery with consumer groups; `asyncio` extra uses `redis.asyncio` so the client is non-blocking |
+| `tenacity` | Retry logic | Declarative retry with `wait_exponential_jitter` and `stop_after_attempt`; used in `PaymentService` to retry failed HTTP calls with backoff and full jitter |
 
 **Why bcrypt directly instead of passlib**: `passlib` 1.7.x has a known incompatibility with `bcrypt >= 4.0.0` (the `__about__` attribute was removed), causing `verify_password` to silently fail. The `bcrypt` library is used directly to avoid this dependency on `passlib`'s version-detection logic.
 
@@ -245,21 +247,33 @@ Simple liveness probe. Returns a static response to confirm the service is runni
 | **Auth** | None |
 | **Rate Limit** | None |
 
+**Query Parameters**:
+
+| Parameter | Default | Constraints | Description |
+|---|---|---|---|
+| `page` | `1` | ≥ 1 | Page number (1-based) |
+| `page_size` | `20` | 1–100 | Number of distinct product names per page |
+
 **Response** (`200 OK`):
 ```json
-[
-  {
-    "name": "Latte",
-    "base_price": 4.00,
-    "variations": [
-      { "id": "uuid", "variation": "Pumpkin Spice", "unit_price": 4.50 },
-      { "id": "uuid", "variation": "Vanilla", "unit_price": 4.30 }
-    ]
-  }
-]
+{
+  "items": [
+    {
+      "name": "Latte",
+      "base_price": "4.00",
+      "variations": [
+        { "id": "uuid", "variation": "Pumpkin Spice", "unit_price": "4.50" },
+        { "id": "uuid", "variation": "Vanilla", "unit_price": "4.30" }
+      ]
+    }
+  ],
+  "total": 5,
+  "page": 1,
+  "page_size": 20
+}
 ```
 
-Products are grouped by name and base price. Each variation's `unit_price` is calculated as `base_price + price_change`.
+Products are grouped by name and base price. Pagination is by distinct product name — a single page always contains complete variation sets for each included product. `total` is the count of distinct product names across the entire catalog. Prices are serialized as fixed-point decimal strings (e.g., `"4.50"`) to avoid JSON float approximation.
 
 ### 4.3 Create User
 
@@ -417,13 +431,13 @@ Calling sign-out twice with the same token is handled gracefully — the second 
 {
   "id": "uuid",
   "status": "WAITING",
-  "total_price": 8.50,
+  "total_price": "8.50",
   "product_ids": ["uuid-1", "uuid-2"],
   "user_id": "<user-uuid>"
 }
 ```
 
-The `user_id` is taken from the authenticated JWT claim — clients cannot supply or override it.
+The `user_id` is taken from the authenticated JWT claim — clients cannot supply or override it. `total_price` is a fixed-point decimal string.
 
 **Error Responses**:
 
@@ -433,11 +447,53 @@ The `user_id` is taken from the authenticated JWT claim — clients cannot suppl
 | `401` | Missing, invalid, expired, or revoked token |
 | `422` | Invalid/missing product IDs |
 | `429` | Rate limit exceeded |
-| `502` | Payment processing failed after retries |
+| `502` | Payment processing failed after retries (or circuit breaker open) |
 
-**Flow**: Authenticate JWT (401 if invalid) → check idempotency key length → check idempotency cache (return cached response if hit) → validate products exist → calculate total → process payment (3 retries) → persist order with `user_id` → save to idempotency cache → return response. Only successful (2xx) responses are cached; errors are never stored, allowing the client to retry a failed request with the same key.
+**Flow**: Authenticate JWT (401 if invalid) → check idempotency key length → check idempotency cache (return cached response if hit) → validate products exist → calculate `total_price` using `Decimal.quantize("0.01")` → process payment (3 retries with exponential backoff + circuit breaker) → persist order with `user_id` → save to idempotency cache → return response. Only successful (2xx) responses are cached; errors are never stored, allowing the client to retry a failed request with the same key.
 
-### 4.8 Get Order Detail
+### 4.8 List Orders
+
+| Property | Value |
+|---|---|
+| **Method** | `GET` |
+| **Path** | `/orders/` |
+| **Auth** | Any valid JWT |
+| **Rate Limit** | None |
+
+**Query Parameters**:
+
+| Parameter | Default | Constraints | Description |
+|---|---|---|---|
+| `page` | `1` | ≥ 1 | Page number (1-based) |
+| `page_size` | `20` | 1–100 | Orders per page |
+
+**Ownership scoping**: Customers see only their own orders. Managers see all orders.
+
+**Response** (`200 OK`):
+```json
+{
+  "items": [
+    {
+      "id": "uuid",
+      "status": "WAITING",
+      "total_price": "8.50",
+      "product_ids": ["uuid-1"],
+      "user_id": "<user-uuid>"
+    }
+  ],
+  "total": 3,
+  "page": 1,
+  "page_size": 20
+}
+```
+
+**Error Responses**:
+
+| Status | Condition |
+|---|---|
+| `401` | Missing, invalid, expired, or revoked token |
+
+### 4.9 Get Order Detail
 
 | Property | Value |
 |---|---|
@@ -453,10 +509,10 @@ The `user_id` is taken from the authenticated JWT claim — clients cannot suppl
 {
   "id": "uuid",
   "status": "WAITING",
-  "total_price": 8.50,
+  "total_price": "8.50",
   "created_at": "2026-03-30T12:34:56",
   "items": [
-    { "id": "uuid", "name": "Latte", "variation": "Pumpkin Spice", "unit_price": 4.50 }
+    { "id": "uuid", "name": "Latte", "variation": "Pumpkin Spice", "unit_price": "4.50" }
   ]
 }
 ```
@@ -468,7 +524,7 @@ The `user_id` is taken from the authenticated JWT claim — clients cannot suppl
 | `401` | Missing, invalid, expired, or revoked token |
 | `404` | Order not found or not owned by the requesting customer |
 
-### 4.9 Update Order Status
+### 4.10 Update Order Status
 
 | Property | Value |
 |---|---|
@@ -489,7 +545,7 @@ The `user_id` is taken from the authenticated JWT claim — clients cannot suppl
 {
   "id": "uuid",
   "status": "PREPARATION",
-  "total_price": 8.50,
+  "total_price": "8.50",
   "product_ids": ["uuid"]
 }
 ```
@@ -511,13 +567,15 @@ The `user_id` is taken from the authenticated JWT claim — clients cannot suppl
 
 All entities are Python dataclasses defined in `src/core/entities/`. They have no framework dependencies.
 
-- **Product**: `id`, `name`, `base_price`, `variation`, `price_change`
-- **Order**: `id`, `status`, `total_price`, `product_ids`, `user_id`
-- **OrderDetail**: `id`, `status`, `total_price`, `created_at`, `items` (list of `OrderItem`)
-- **OrderItem**: `id`, `name`, `variation`, `unit_price`
-- **MenuItem**: `name`, `base_price`, `variations` (list of `MenuVariation`)
-- **MenuVariation**: `id`, `variation`, `unit_price`
+- **Product**: `id`, `name`, `base_price: Decimal`, `variation`, `price_change: Decimal`
+- **Order**: `id`, `status`, `total_price: Decimal`, `product_ids`, `user_id`
+- **OrderDetail**: `id`, `status`, `total_price: Decimal`, `created_at`, `items` (list of `OrderItem`)
+- **OrderItem**: `id`, `name`, `variation`, `unit_price: Decimal`
+- **MenuItem**: `name`, `base_price: Decimal`, `variations` (list of `MenuVariation`)
+- **MenuVariation**: `id`, `variation`, `unit_price: Decimal`
 - **User**: `id`, `email`, `role`, `password_hash`
+
+All monetary fields use Python's `Decimal` type. The repository layer reads DB values as `Decimal(str(value)).quantize(Decimal("0.01"))` to guarantee exactly two decimal places. The Pydantic schemas serialize monetary `Decimal` values as fixed-point strings in JSON responses (e.g., `"4.50"`) via `PlainSerializer`.
 
 `password_hash` is part of the `User` entity because it is core domain data. It is never serialized in any API response — the `UserResponse` Pydantic schema selects only `id`, `email`, and `role`.
 
@@ -558,8 +616,8 @@ Roles are stored in the `users` table and embedded in JWT claims at sign-in time
 
 Abstract interfaces are defined in `src/core/repositories/` using Python ABCs. Concrete implementations live in `src/infrastructure/database/repositories/`. This decouples the domain logic from the database:
 
-- `AbstractProductRepository` defines `list_all()` and `get_by_ids()`
-- `AbstractOrderRepository` defines `create()`, `get_by_id()`, `get_detail_by_id()`, `get_detail_by_id_for_user()`, and `update_status()`
+- `AbstractProductRepository` defines `list_all(offset, limit) -> tuple[list[Product], int]` and `get_by_ids()`
+- `AbstractOrderRepository` defines `create()`, `get_by_id()`, `get_detail_by_id()`, `get_detail_by_id_for_user()`, `update_status()`, `list_all(offset, limit) -> tuple[list[Order], int]`, and `list_for_user(user_id, offset, limit) -> tuple[list[Order], int]`
 - `AbstractUserRepository` defines `create()`, `get_by_id()`, `get_by_email()`, and `list_all()`
 - `AbstractIdempotencyRepository` defines `get(key)`, `save(key, status_code, body)`, and `delete_expired()` — used exclusively at the API layer and background purge task, not inside use cases
 - `AbstractRevokedTokenRepository` defines `revoke(jti, expires_at)`, `is_revoked(jti)`, and `delete_expired()`
@@ -570,10 +628,11 @@ The same approach applies to external services (`AbstractPaymentService`, `Abstr
 
 Each use case is a single-responsibility class with an `execute()` method:
 
-- `CreateOrder.execute(product_ids, user_id)` — validates, calculates, pays, persists with owner
+- `CreateOrder.execute(product_ids, user_id)` — validates, computes `total_price` with `Decimal.quantize("0.01")`, charges payment, persists with owner
 - `GetOrderDetail.execute(order_id, user_id=None)` — retrieves full order; when `user_id` is provided (customers), scopes the query to that owner only
+- `ListOrders.execute(user_id, role, offset, limit)` — delegates to `list_all` (MANAGER) or `list_for_user` (CUSTOMER); returns `(orders, total)`
 - `UpdateOrderStatus.execute(order_id, new_status)` — validates transition, updates, notifies
-- `GetMenu.execute()` — fetches and groups products into menu items
+- `GetMenu.execute(offset, limit)` — fetches products for the requested page, groups by name into `MenuItem` objects, returns `(items, total)`
 - `CreateUser.execute(email, password)` — hashes password, creates user with a new UUID and hard-coded `CUSTOMER` role
 - `GetUser.execute(user_id)` — retrieves a user by ID or returns `None`
 - `SignIn.execute(email, password)` — timing-safe credential verification, returns a signed JWT
@@ -601,12 +660,24 @@ Processes payments before an order is persisted. This is a blocking call in the 
 |---|---|
 | **URL** | Configurable via `COFFEE_SHOP_PAYMENT_URL` |
 | **Default** | `https://challenge.trio.dev/api/v1/payment` |
-| **Request** | `POST` with `{"value": <total_price>}` |
+| **Request** | `POST` with `{"value": <total_price_as_float>}` |
 | **Timeout** | 10 seconds per attempt |
-| **Retries** | 3 attempts with no backoff delay |
-| **Failure** | Raises `PaymentFailedError` after all retries exhausted |
+| **Retries** | Up to 3 attempts; `wait_exponential_jitter(initial=1s, max=10s)` between attempts |
+| **Failure** | Raises `PaymentFailedError` after all retries exhausted or circuit open |
 
-The retry strategy is intentionally simple (immediate retries, no exponential backoff). In production, this should use exponential backoff with jitter to avoid thundering herd problems, and potentially a circuit breaker to fail fast when the payment service is known to be down.
+The `total_price` is a `Decimal` internally but serialized as `float(value)` in the JSON request body (JSON has no decimal type). Retries use `tenacity` with full jitter to spread load during transient failures.
+
+**Circuit Breaker** (`src/infrastructure/services/circuit_breaker.py`):
+
+The `payment_circuit_breaker` singleton wraps every payment call with a three-state machine:
+
+| State | Behaviour |
+|---|---|
+| **CLOSED** (normal) | Requests pass through. Consecutive failure counter increments on each failure. |
+| **OPEN** (fail fast) | Once `failure_threshold` (default: 5) consecutive failures are reached, the circuit opens. All subsequent calls raise `PaymentFailedError` immediately, without making an HTTP request. |
+| **HALF_OPEN** (probe) | After `recovery_timeout` seconds (default: 30s), one probe request is allowed. On success: transition to CLOSED and reset the counter. On failure: return to OPEN and reset `opened_at`. |
+
+Both thresholds are configurable via `COFFEE_SHOP_PAYMENT_CIRCUIT_BREAKER_THRESHOLD` and `COFFEE_SHOP_PAYMENT_CIRCUIT_BREAKER_RECOVERY_SECONDS`. State is in-memory (single process); for multi-instance deployments, the state would need to be shared via Redis.
 
 ### 7.2 Notification Service
 
@@ -759,9 +830,9 @@ Five tables:
 |---|---|---|
 | `id` | String (UUID) | Primary Key |
 | `name` | String | NOT NULL |
-| `base_price` | Float | NOT NULL |
+| `base_price` | Numeric(10, 2) | NOT NULL |
 | `variation` | String | NOT NULL |
-| `price_change` | Float | NOT NULL |
+| `price_change` | Numeric(10, 2) | NOT NULL |
 
 **`orders`**
 
@@ -769,7 +840,7 @@ Five tables:
 |---|---|---|
 | `id` | String (UUID) | Primary Key |
 | `status` | String | NOT NULL |
-| `total_price` | Float | NOT NULL |
+| `total_price` | Numeric(10, 2) | NOT NULL |
 | `created_at` | DateTime | NOT NULL, server default: now() |
 | `user_id` | String (UUID) | NOT NULL, Foreign Key → users.id |
 
@@ -823,6 +894,7 @@ Managed by Alembic. Migration history:
 6. **Add password_hash to users** — adds the `password_hash` NOT NULL column to the users table
 7. **Add user_id to orders** — adds the `user_id` column (FK → users.id, nullable in migration for back-compat, enforced NOT NULL in the application layer for new orders)
 8. **Create revoked_tokens table** — creates the `revoked_tokens` table with `jti` and `expires_at`
+9. **Float to Numeric** — converts `products.base_price`, `products.price_change`, and `orders.total_price` from `Float` to `Numeric(10, 2)` using `batch_alter_table` (required for SQLite column type changes)
 
 Run migrations with: `alembic upgrade head`
 
@@ -928,10 +1000,11 @@ CreateOrder.execute(product_ids, user_id)
   ├─ 1. ProductRepository.get_by_ids() ──► Validate all IDs exist
   │     └─ If missing → InvalidProductError → 422
   │
-  ├─ 2. Calculate total_price = Σ(base_price + price_change)
+  ├─ 2. total_price = sum(base_price + price_change for each product).quantize(Decimal("0.01"))
   │
   ├─ 3. PaymentService.process(total_price) ──► External HTTP call
-  │     ├─ Retry up to 3 times
+  │     ├─ Circuit breaker check: if OPEN → PaymentFailedError → 502 (no HTTP)
+  │     ├─ Retry up to 3 times with exponential backoff + jitter
   │     └─ If all fail → PaymentFailedError → 502
   │
   ├─ 4. OrderRepository.create(order) ──► Atomic DB transaction
@@ -995,17 +1068,13 @@ The following choices were made intentionally to keep the project simple and foc
 
 ### 11.2 Known Limitations
 
-**Payment retry without backoff**: The payment service retries immediately 3 times with no delay between attempts. Under sustained payment service degradation, this amplifies load on the failing service. Production should use exponential backoff with jitter and consider a circuit breaker pattern.
-
-**Float arithmetic for prices**: Prices are stored and calculated as Python floats, which can introduce floating-point precision errors (e.g., `0.1 + 0.2 = 0.30000000000000004`). The use of `round(..., 2)` mitigates this in most cases, but production financial calculations should use `Decimal` types throughout.
-
-**No pagination on menu or order list**: The menu endpoint returns all products in a single response. This is fine for a small catalog (13 items), but would not scale to hundreds or thousands of products. There is no order listing endpoint at all.
-
 **Rate limiting by IP only**: Behind a reverse proxy or NAT, many clients may share the same IP address, causing legitimate users to be rate-limited. In production, rate limiting should be tied to authenticated user identity or API keys.
 
 **Single CORS origin**: Only `http://localhost:3000` is allowed. The allowed origins list should be configurable via environment variables for production deployments.
 
 **No request logging or tracing**: While the payment and notification services log their operations, there is no structured request logging, correlation IDs, or distributed tracing. Production APIs need observability through request logs, metrics, and traces.
+
+**Circuit breaker state is in-memory**: The payment circuit breaker resets on process restart and is not shared across instances. Under multi-process or multi-instance deployments, each instance tracks failures independently, so the circuit will not trip at the cluster level. Sharing state would require a Redis-backed counter.
 
 ### 11.3 Production Readiness Checklist
 
@@ -1019,10 +1088,11 @@ If this project were to go live, the following changes would need to be implemen
 | **Authorization scope** | ✅ Orders tied to `user_id`; customers scoped to own orders | — |
 | **Role lockdown** | ✅ Registration always `CUSTOMER`; no self-service escalation | — |
 | **Password security** | ✅ bcrypt, min 8 chars, timing-safe sign-in | — |
-| **Payment retries** | Immediate, 3 attempts | Exponential backoff with jitter; circuit breaker |
+| **Payment retries** | ✅ Exponential backoff with jitter (tenacity); circuit breaker (CLOSED/OPEN/HALF_OPEN) | Circuit breaker state is in-memory; multi-instance deployments need Redis-backed state |
 | **Notifications** | ✅ Redis Stream with consumer group ACK; worker retries with backoff | For multi-instance: ensure all instances share the same Redis and stream |
 | **Idempotency** | ✅ `POST /orders/` and `POST /users/`; 60-min purge; 128-char key limit | — |
-| **Price precision** | Python `float` | `Decimal` types end-to-end |
+| **Price precision** | ✅ `Decimal` end-to-end; `Numeric(10,2)` in DB; fixed-point strings in JSON | — |
+| **Pagination** | ✅ `GET /menu` and `GET /orders/` paginated; page_size capped at 100 | — |
 | **CORS** | Hardcoded localhost | Configurable via environment variables |
 | **Rate limiting** | Per-IP only | Per-user or per-API-key |
 | **Observability** | Basic logging | Structured logs, metrics, distributed tracing |

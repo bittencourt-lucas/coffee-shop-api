@@ -27,12 +27,13 @@ Sign out via `POST /auth/sign-out` to invalidate the token immediately. Revoked 
 | Method  | Path                      | Auth Required  | Rate Limit | Description                                       |
 |---------|---------------------------|----------------|------------|---------------------------------------------------|
 | `GET`   | `/healthcheck`            | No             | —          | Liveness probe                                    |
-| `GET`   | `/menu`                   | No             | —          | List all products grouped by name with variations |
+| `GET`   | `/menu`                   | No             | —          | List products grouped by name, paginated          |
 | `POST`  | `/users/`                 | No             | —          | Register a new user (role always `CUSTOMER`)      |
 | `GET`   | `/users/{id}`             | Any valid JWT  | —          | Get a user by ID                                  |
 | `POST`  | `/auth/sign-in`           | No             | —          | Authenticate and receive a JWT                    |
 | `POST`  | `/auth/sign-out`          | Any valid JWT  | —          | Revoke the current JWT immediately                |
 | `POST`  | `/orders/`                | Any valid JWT  | 10/min     | Create an order and process payment               |
+| `GET`   | `/orders/`                | Any valid JWT  | —          | List orders (customers: own; managers: all), paginated |
 | `GET`   | `/orders/{id}`            | Any valid JWT  | —          | Get full order details (customers: own orders only) |
 | `PATCH` | `/orders/{id}/status`     | MANAGER token  | —          | Advance order status                              |
 
@@ -52,7 +53,7 @@ Any out-of-sequence update returns `422`.
 
 ### External Integrations
 
-- **Payment** (`POST /api/v1/payment`) — called on order creation. Retries up to 3 times; returns `502` if all attempts fail. External service errors are not exposed to clients.
+- **Payment** (`POST /api/v1/payment`) — called on order creation. Retries up to 3 times with exponential backoff and full jitter (base 1s, cap 10s) using `tenacity`. A circuit breaker (configurable threshold and recovery timeout) trips to fail-fast when the payment service is consistently down, resetting after a probe request succeeds. Returns `502` if all attempts fail or the circuit is open. External service errors are not exposed to clients.
 - **Notification** (`POST /api/v1/notification`) — called after every status update. Status changes are published to a Redis Stream and delivered by a background worker. The worker retries up to 3 times with exponential backoff; after exhausting retries the message is acknowledged and the failure logged. Delivery is durable across retries and survives transient HTTP failures.
 
 ### Security
@@ -64,7 +65,8 @@ Any out-of-sequence update returns `422`.
 - **Password hashing** — Passwords are hashed with bcrypt before storage. A minimum length of 8 characters is enforced at the API layer. Plaintext passwords are never persisted.
 - **CORS** — Restricted to explicit allowed origins, methods, and headers via `CORSMiddleware`.
 - **Rate limiting** — `POST /orders/` is limited to 10 requests/minute per IP using `slowapi`. Exceeding the limit returns `429 Too Many Requests`.
-- **Input validation** — `product_ids` is capped at 50 items per order; `Idempotency-Key` headers are capped at 128 characters.
+- **Input validation** — `product_ids` is capped at 50 items per order; `Idempotency-Key` headers are capped at 128 characters; `page_size` is capped at 100 on paginated endpoints.
+- **Decimal pricing** — all monetary values use Python `Decimal` with `Numeric(10, 2)` storage. Prices are serialized as fixed-point strings (e.g., `"4.50"`) in API responses to avoid float approximation in JSON.
 - **Error sanitization** — External service errors are logged server-side only; clients receive generic error messages.
 - **Structured logging** — Services use Python `logging` instead of `print`.
 - **Configurable secrets** — All external URLs, the database connection string, and the JWT secret key are loaded from environment variables via `pydantic-settings`.
@@ -156,30 +158,31 @@ pytest tests/ --cov=src --cov-report=term-missing
 
 ## Test Coverage
 
-149 tests across unit and integration suites.
+184 tests across unit and integration suites.
 
 ```
 Name                                                                   Stmts   Miss  Cover
 -------------------------------------------------------------------------------------------
-src\core\entities\*                                                       66      0   100%
+src\core\entities\*                                                       65      0   100%
 src\core\enums\*                                                          13      0   100%
 src\core\exceptions.py                                                    15      0   100%
 src\core\services\*                                                        7      0   100%
-src\infrastructure\api\routes\order_routes.py                             49      0   100%
+src\infrastructure\api\routes\order_routes.py                             54      0   100%
 src\infrastructure\api\routes\user_routes.py                              33      0   100%
 src\infrastructure\api\routes\auth_routes.py                              18      0   100%
-src\infrastructure\api\routes\product_routes.py                           10      0   100%
-src\infrastructure\api\schemas\*                                          55      0   100%
+src\infrastructure\api\routes\product_routes.py                           14      0   100%
+src\infrastructure\api\schemas\*                                          71      0   100%
 src\infrastructure\auth\jwt.py                                            23      2    91%
 src\infrastructure\auth\password.py                                        6      0   100%
 src\infrastructure\database\models\*                                      19      0   100%
-src\infrastructure\database\repositories\order_repository.py              47      1    98%
+src\infrastructure\database\repositories\order_repository.py              67      1    99%
 src\infrastructure\database\repositories\user_repository.py               29      2    93%
 src\infrastructure\database\seed.py                                       11      0   100%
-src\infrastructure\services\payment_service.py                            23      0   100%
-src\use_cases\*                                                           91      0   100%
+src\infrastructure\services\circuit_breaker.py                            59      0   100%
+src\infrastructure\services\payment_service.py                            31      0   100%
+src\use_cases\*                                                          103      0   100%
 -------------------------------------------------------------------------------------------
-TOTAL                                                                    852     65    92%
+TOTAL                                                                   1075     95    91%
 ```
 
-Overall coverage: **92%**. Uncovered lines are limited to abstract method stubs, the app lifespan startup/shutdown hooks, the background purge loop's sleep iteration, and the notification service's live HTTP path (intentionally not exercised in tests, as the service is mocked via dependency injection).
+Overall coverage: **91%**. Uncovered lines are limited to abstract method stubs, the app lifespan startup/shutdown hooks, the background purge and notification worker sleep iterations, and the legacy `NotificationService` HTTP path (superseded by `RedisNotificationService`; retained for reference but not exercised in tests).
