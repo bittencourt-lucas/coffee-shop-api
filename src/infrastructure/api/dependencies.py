@@ -20,7 +20,8 @@ from src.infrastructure.database.repositories import (
     IdempotencyRepository,
     RevokedTokenRepository,
 )
-from src.infrastructure.services import PaymentService, NotificationService
+from src.infrastructure.redis_client import redis_client
+from src.infrastructure.services import PaymentService, RedisNotificationService
 
 _bearer = HTTPBearer(auto_error=False)
 
@@ -30,7 +31,7 @@ def get_payment_service() -> AbstractPaymentService:
 
 
 def get_notification_service() -> AbstractNotificationService:
-    return NotificationService()
+    return RedisNotificationService(redis_client)
 
 
 def get_product_repository() -> AbstractProductRepository:

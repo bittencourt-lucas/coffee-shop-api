@@ -12,6 +12,9 @@ from src.infrastructure.database.connection import database
 from src.infrastructure.database.repositories import IdempotencyRepository, RevokedTokenRepository
 from src.infrastructure.database.seed import seed_catalog
 from src.infrastructure.api.routes import menu_router, order_router, healthcheck_router, user_router, auth_router
+from src.infrastructure.redis_client import redis_client
+from src.infrastructure.settings import settings
+from src.infrastructure.tasks.notification_worker import notification_worker
 from src.infrastructure.tasks.purge_expired import purge_loop
 
 
@@ -22,13 +25,22 @@ async def lifespan(app: FastAPI):
     purge_task = asyncio.create_task(
         purge_loop(IdempotencyRepository(database), RevokedTokenRepository(database))
     )
+    notification_task = asyncio.create_task(
+        notification_worker(redis_client, settings.notification_url)
+    )
     yield
     purge_task.cancel()
+    notification_task.cancel()
     try:
         await purge_task
     except asyncio.CancelledError:
         pass
+    try:
+        await notification_task
+    except asyncio.CancelledError:
+        pass
     await database.disconnect()
+    await redis_client.aclose()
 
 
 app = FastAPI(title="Coffee Shop API", lifespan=lifespan)

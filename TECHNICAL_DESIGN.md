@@ -123,9 +123,11 @@ src/
 │   │   ├── repositories/          # Concrete repository implementations
 │   │   ├── connection.py          # Database instance and metadata
 │   │   └── seed.py                # Product catalog seeding
-│   ├── services/                  # PaymentService (with retries), NotificationService (fire-and-forget)
+│   ├── services/                  # PaymentService (with retries), RedisNotificationService (stream publisher)
 │   ├── tasks/
-│   │   └── purge_expired.py       # Background loop: deletes expired idempotency keys and revoked tokens
+│   │   ├── purge_expired.py       # Background loop: deletes expired idempotency keys and revoked tokens
+│   │   └── notification_worker.py # Background consumer: reads notifications stream, delivers via HTTP with retry
+│   ├── redis_client.py            # Module-level redis.asyncio.Redis singleton
 │   └── settings.py                # pydantic-settings configuration (warns on default JWT secret)
 │
 └── main.py                        # App entry point, lifespan, middleware registration
@@ -213,6 +215,7 @@ If the application starts with the default `jwt_secret_key` value, a `CRITICAL` 
 | `slowapi` | Rate limiting | Simple decorator-based rate limiting built on top of `limits` library |
 | `python-jose[cryptography]` | JWT encoding/decoding | Widely used, supports multiple algorithms; `[cryptography]` extra enables RS256/ES256 for future upgrades |
 | `bcrypt` | Password hashing | Industry-standard adaptive hash function; resistant to brute-force via cost factor |
+| `redis[asyncio]` | Notification message queue | Redis Streams provide durable, ACK-based delivery with consumer groups; `asyncio` extra uses `redis.asyncio` so the client is non-blocking |
 
 **Why bcrypt directly instead of passlib**: `passlib` 1.7.x has a known incompatibility with `bcrypt >= 4.0.0` (the `__about__` attribute was removed), causing `verify_password` to silently fail. The `bcrypt` library is used directly to avoid this dependency on `passlib`'s version-detection logic.
 
@@ -607,18 +610,42 @@ The retry strategy is intentionally simple (immediate retries, no exponential ba
 
 ### 7.2 Notification Service
 
-Sends status change notifications after an order's status is updated. This is a non-blocking, fire-and-forget call.
+Sends status change notifications after an order's status is updated via a Redis Stream. The route handler returns immediately; delivery happens asynchronously in a background worker.
+
+#### Architecture
+
+The implementation is split into two components:
+
+**Producer — `RedisNotificationService`** (`src/infrastructure/services/redis_notification_service.py`):
+
+| Property | Value |
+|---|---|
+| **Invocation** | Called synchronously from `UpdateOrderStatus` use case via `AbstractNotificationService.notify()` |
+| **Action** | `XADD notifications * status <status>` — appends one entry to the `notifications` Redis Stream |
+| **Blocking** | Only awaits the Redis write; returns immediately after the message is enqueued |
+
+**Consumer — `notification_worker`** (`src/infrastructure/tasks/notification_worker.py`):
 
 | Property | Value |
 |---|---|
 | **URL** | Configurable via `COFFEE_SHOP_NOTIFICATION_URL` |
 | **Default** | `https://challenge.trio.dev/api/v1/notification` |
 | **Request** | `POST` with `{"status": "<new_status>"}` |
-| **Timeout** | 10 seconds |
-| **Retries** | None |
-| **Invocation** | `asyncio.create_task()` — non-blocking |
+| **Timeout** | 10 seconds per attempt |
+| **Retries** | Up to 3 attempts with exponential backoff (2s, 4s) |
+| **Invocation** | `asyncio.create_task()` in the app lifespan; cancelled on shutdown |
 
-Failures are logged but never propagate to the client. The status update succeeds regardless of whether the notification was delivered. This means notifications can be silently lost — acceptable for a demo, but production would require a message queue (e.g., RabbitMQ, SQS) or an outbox pattern to guarantee delivery.
+#### Delivery guarantees
+
+The worker uses a Redis consumer group (`notification-group`) and explicit ACKs:
+
+1. **Startup**: `XGROUP CREATE` is called once (idempotent — `BUSYGROUP` error ignored if the group already exists). `mkstream=True` creates the stream if it does not yet exist.
+2. **Each loop iteration**:
+   - `XAUTOCLAIM` reclaims any messages that were delivered but not ACKed within 60 seconds (e.g., worker crashed mid-delivery).
+   - `XREADGROUP` reads new messages, blocking up to 5 seconds if the stream is empty.
+3. **Delivery (`_deliver`)**: For each message, the worker posts to the notification URL. On success (`2xx`) it calls `XACK`. On failure it retries with `2^attempt` second delays. After exhausting all retries the message is still ACKed (to prevent an indefinite requeue loop) and an error is logged.
+
+This means a notification can be lost only if all retry attempts are exhausted — not on the first failure or on a process crash. The response to the client is never blocked on notification delivery.
 
 ---
 
@@ -942,8 +969,13 @@ UpdateOrderStatus.execute(order_id, new_status)
   │
   ├─ 3. OrderRepository.update_status() ──► UPDATE orders SET status
   │
-  ├─ 4. NotificationService.notify(status) ──► Fire-and-forget (asyncio.create_task)
-  │     └─ Failures logged, never propagated
+  ├─ 4. RedisNotificationService.notify(status) ──► XADD notifications * status <status>
+  │     └─ Returns as soon as the message is enqueued in Redis
+  │
+  │  [Background — notification_worker]
+  │     XREADGROUP ──► receive message ──► POST notification URL (up to 3 retries with backoff)
+  │     ├─ Success → XACK
+  │     └─ All retries exhausted → XACK + log error
   │
   ▼
 200 OK { id, status: "PREPARATION", total_price, product_ids }
@@ -965,8 +997,6 @@ The following choices were made intentionally to keep the project simple and foc
 
 **Payment retry without backoff**: The payment service retries immediately 3 times with no delay between attempts. Under sustained payment service degradation, this amplifies load on the failing service. Production should use exponential backoff with jitter and consider a circuit breaker pattern.
 
-**Notification delivery is not guaranteed**: Notifications are fire-and-forget via `asyncio.create_task()`. If the notification service is down or the application process crashes after updating the status but before the notification task completes, the notification is lost. Production should use a message queue or transactional outbox pattern.
-
 **Float arithmetic for prices**: Prices are stored and calculated as Python floats, which can introduce floating-point precision errors (e.g., `0.1 + 0.2 = 0.30000000000000004`). The use of `round(..., 2)` mitigates this in most cases, but production financial calculations should use `Decimal` types throughout.
 
 **No pagination on menu or order list**: The menu endpoint returns all products in a single response. This is fine for a small catalog (13 items), but would not scale to hundreds or thousands of products. There is no order listing endpoint at all.
@@ -985,12 +1015,12 @@ If this project were to go live, the following changes would need to be implemen
 |---|---|---|
 | **Database** | SQLite (file-based) | PostgreSQL with connection pooling |
 | **JWT secret** | Default warned via `CRITICAL` log | Strong random secret via secrets manager |
-| **Token revocation** | ✅ SQLite denylist; 60-min background purge | For high-scale: move denylist to Redis for sub-millisecond lookup |
+| **Token revocation** | ✅ SQLite denylist; 60-min background purge | Redis is now a runtime dependency — moving the denylist there requires no new infrastructure |
 | **Authorization scope** | ✅ Orders tied to `user_id`; customers scoped to own orders | — |
 | **Role lockdown** | ✅ Registration always `CUSTOMER`; no self-service escalation | — |
 | **Password security** | ✅ bcrypt, min 8 chars, timing-safe sign-in | — |
 | **Payment retries** | Immediate, 3 attempts | Exponential backoff with jitter; circuit breaker |
-| **Notifications** | Fire-and-forget | Message queue (RabbitMQ/SQS) or outbox pattern |
+| **Notifications** | ✅ Redis Stream with consumer group ACK; worker retries with backoff | For multi-instance: ensure all instances share the same Redis and stream |
 | **Idempotency** | ✅ `POST /orders/` and `POST /users/`; 60-min purge; 128-char key limit | — |
 | **Price precision** | Python `float` | `Decimal` types end-to-end |
 | **CORS** | Hardcoded localhost | Configurable via environment variables |
