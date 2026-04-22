@@ -5,7 +5,7 @@ from src.infrastructure.database.repositories import UserRepository
 from src.main import app
 from tests.integration.conftest import _ClientContext
 
-_USER_PAYLOAD = {"email": "bob@example.com", "password": "hunter2", "role": "CUSTOMER"}
+_USER_PAYLOAD = {"email": "bob@example.com", "password": "hunter22"}
 
 
 @pytest.fixture

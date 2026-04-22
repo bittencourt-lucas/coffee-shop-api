@@ -88,6 +88,17 @@ async def failing_payment_client(test_db):
         yield c
 
 
+class TestCreateOrderIdempotency:
+    async def test_returns_400_on_key_exceeding_128_characters(self, order_client: AsyncClient):
+        product_ids = await _get_product_ids(order_client)
+        long_key = "x" * 129
+        response = await order_client.post(
+            "/orders/", json={"product_ids": product_ids},
+            headers={**_auth_headers(Role.CUSTOMER), "Idempotency-Key": long_key},
+        )
+        assert response.status_code == 400
+
+
 class TestCreateOrderStatus:
     async def test_returns_201_on_successful_payment(self, order_client: AsyncClient):
         product_ids = await _get_product_ids(order_client)

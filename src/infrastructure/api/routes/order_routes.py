@@ -44,6 +44,11 @@ async def create_order(
     idempotency_repo: AbstractIdempotencyRepository = Depends(get_idempotency_repository),
 ):
     if idempotency_key:
+        if len(idempotency_key) > 128:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Idempotency-Key must be 128 characters or fewer",
+            )
         cached = await idempotency_repo.get(idempotency_key)
         if cached:
             return JSONResponse(status_code=cached.status_code, content=cached.body)

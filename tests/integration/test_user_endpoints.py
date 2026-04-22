@@ -24,7 +24,7 @@ def _auth_headers() -> dict:
     return {"Authorization": f"Bearer {token}"}
 
 
-_USER_PAYLOAD = {"email": "alice@example.com", "password": "secure123", "role": "CUSTOMER"}
+_USER_PAYLOAD = {"email": "alice@example.com", "password": "secure123"}
 
 
 class TestCreateUserStatus:
@@ -41,6 +41,15 @@ class TestCreateUserStatus:
         response = await user_client.post("/users/", json={"email": "a@b.com"})
         assert response.status_code == 422
 
+    async def test_returns_422_on_short_password(self, user_client):
+        response = await user_client.post("/users/", json={"email": "a@b.com", "password": "short"})
+        assert response.status_code == 422
+
+    async def test_role_field_is_ignored_and_always_customer(self, user_client):
+        payload = {**_USER_PAYLOAD, "role": "MANAGER"}
+        data = (await user_client.post("/users/", json=payload)).json()
+        assert data["role"] == "CUSTOMER"
+
 
 class TestCreateUserResponse:
     async def test_response_contains_id(self, user_client):
@@ -51,9 +60,9 @@ class TestCreateUserResponse:
         data = (await user_client.post("/users/", json=_USER_PAYLOAD)).json()
         assert data["email"] == _USER_PAYLOAD["email"]
 
-    async def test_response_role_matches_request(self, user_client):
+    async def test_response_role_is_always_customer(self, user_client):
         data = (await user_client.post("/users/", json=_USER_PAYLOAD)).json()
-        assert data["role"] == _USER_PAYLOAD["role"]
+        assert data["role"] == "CUSTOMER"
 
     async def test_response_does_not_expose_password_hash(self, user_client):
         data = (await user_client.post("/users/", json=_USER_PAYLOAD)).json()
@@ -88,7 +97,7 @@ class TestCreateUserIdempotency:
         key = str(uuid4())
         await user_client.post("/users/", json=_USER_PAYLOAD, headers={"Idempotency-Key": key})
         response = await user_client.post(
-            "/users/", json={"email": "other@example.com", "password": "x", "role": "CUSTOMER"},
+            "/users/", json={"email": "other@example.com", "password": "password1"},
             headers={"Idempotency-Key": key},
         )
         assert response.status_code == 201
@@ -103,12 +112,17 @@ class TestCreateUserIdempotency:
     async def test_different_keys_allow_different_users(self, user_client):
         first = (await user_client.post(
             "/users/",
-            json={"email": "a@example.com", "password": "x", "role": "CUSTOMER"},
+            json={"email": "a@example.com", "password": "password1"},
             headers={"Idempotency-Key": str(uuid4())},
         )).json()
         second = (await user_client.post(
             "/users/",
-            json={"email": "b@example.com", "password": "x", "role": "CUSTOMER"},
+            json={"email": "b@example.com", "password": "password2"},
             headers={"Idempotency-Key": str(uuid4())},
         )).json()
         assert first["id"] != second["id"]
+
+    async def test_returns_400_on_key_exceeding_128_characters(self, user_client):
+        long_key = "x" * 129
+        response = await user_client.post("/users/", json=_USER_PAYLOAD, headers={"Idempotency-Key": long_key})
+        assert response.status_code == 400

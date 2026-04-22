@@ -1,14 +1,13 @@
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 from src.core.enums import Role
 
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str
-    role: Role
+    password: str = Field(min_length=8)
 
 
 class UserResponse(BaseModel):

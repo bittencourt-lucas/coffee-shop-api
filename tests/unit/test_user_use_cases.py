@@ -22,35 +22,40 @@ def user_repo() -> AsyncMock:
 
 # --- CreateUser ---
 
-async def test_create_user_returns_user_with_provided_email_and_role(user_repo):
-    user = await CreateUser(user_repo).execute(email="a@b.com", role=Role.CUSTOMER, password="secret")
+async def test_create_user_returns_user_with_provided_email(user_repo):
+    user = await CreateUser(user_repo).execute(email="a@b.com", password="secret123")
 
     assert user.email == "a@b.com"
+
+
+async def test_create_user_always_assigns_customer_role(user_repo):
+    user = await CreateUser(user_repo).execute(email="a@b.com", password="secret123")
+
     assert user.role == Role.CUSTOMER
 
 
 async def test_create_user_assigns_a_uuid(user_repo):
-    user = await CreateUser(user_repo).execute(email="a@b.com", role=Role.CUSTOMER, password="secret")
+    user = await CreateUser(user_repo).execute(email="a@b.com", password="secret123")
 
     assert user.id is not None
 
 
 async def test_create_user_calls_repository(user_repo):
-    await CreateUser(user_repo).execute(email="a@b.com", role=Role.MANAGER, password="secret")
+    await CreateUser(user_repo).execute(email="a@b.com", password="secret123")
 
     user_repo.create.assert_called_once()
 
 
 async def test_create_user_passes_correct_entity_to_repository(user_repo):
-    await CreateUser(user_repo).execute(email="mgr@shop.com", role=Role.MANAGER, password="secret")
+    await CreateUser(user_repo).execute(email="mgr@shop.com", password="secret123")
 
     created: User = user_repo.create.call_args[0][0]
     assert created.email == "mgr@shop.com"
-    assert created.role == Role.MANAGER
+    assert created.role == Role.CUSTOMER
 
 
 async def test_create_user_hashes_password(user_repo):
-    await CreateUser(user_repo).execute(email="a@b.com", role=Role.CUSTOMER, password="mypassword")
+    await CreateUser(user_repo).execute(email="a@b.com", password="mypassword")
 
     created: User = user_repo.create.call_args[0][0]
     assert created.password_hash != "mypassword"
@@ -58,7 +63,7 @@ async def test_create_user_hashes_password(user_repo):
 
 
 async def test_create_user_does_not_store_plaintext_password(user_repo):
-    await CreateUser(user_repo).execute(email="a@b.com", role=Role.CUSTOMER, password="secret123")
+    await CreateUser(user_repo).execute(email="a@b.com", password="secret123")
 
     created: User = user_repo.create.call_args[0][0]
     assert "secret123" not in created.password_hash
@@ -120,6 +125,16 @@ async def test_sign_in_raises_for_unknown_email(user_repo):
 
     with pytest.raises(InvalidCredentialsError):
         await SignIn(user_repo).execute(email="nobody@example.com", password="any")
+
+
+async def test_sign_in_calls_verify_password_even_when_email_not_found(user_repo):
+    user_repo.get_by_email.return_value = None
+
+    with patch("src.use_cases.user.sign_in.verify_password", return_value=False) as mock_verify:
+        with pytest.raises(InvalidCredentialsError):
+            await SignIn(user_repo).execute(email="nobody@example.com", password="any")
+
+    mock_verify.assert_called_once()
 
 
 async def test_sign_in_calls_repository_with_provided_email(user_repo):

@@ -10,6 +10,6 @@ class CreateUser:
     def __init__(self, repository: AbstractUserRepository) -> None:
         self._repository = repository
 
-    async def execute(self, email: str, role: Role, password: str) -> User:
-        user = User(id=uuid4(), email=email, role=role, password_hash=hash_password(password))
+    async def execute(self, email: str, password: str) -> User:
+        user = User(id=uuid4(), email=email, role=Role.CUSTOMER, password_hash=hash_password(password))
         return await self._repository.create(user)

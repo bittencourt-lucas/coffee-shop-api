@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import JSONResponse
 
+from src.core.exceptions import DuplicateEmailError
 from src.core.repositories import AbstractIdempotencyRepository, AbstractUserRepository
 from src.infrastructure.api.dependencies import get_current_user, get_idempotency_repository, get_user_repository
 from src.infrastructure.api.schemas import UserCreate, UserResponse
@@ -21,6 +22,11 @@ async def create_user(
     idempotency_repo: AbstractIdempotencyRepository = Depends(get_idempotency_repository),
 ):
     if idempotency_key:
+        if len(idempotency_key) > 128:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Idempotency-Key must be 128 characters or fewer",
+            )
         cached = await idempotency_repo.get(idempotency_key)
         if cached:
             return JSONResponse(status_code=cached.status_code, content=cached.body)
@@ -28,10 +34,9 @@ async def create_user(
     try:
         user = await CreateUser(user_repo).execute(
             email=body.email,
-            role=body.role,
             password=body.password,
         )
-    except Exception:
+    except DuplicateEmailError:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="A user with this email already exists",
