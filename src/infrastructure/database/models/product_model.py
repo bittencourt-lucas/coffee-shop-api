@@ -7,7 +7,7 @@ products_table = sqlalchemy.Table(
     metadata,
     sqlalchemy.Column("id", sqlalchemy.String, primary_key=True),
     sqlalchemy.Column("name", sqlalchemy.String, nullable=False),
-    sqlalchemy.Column("base_price", sqlalchemy.Float, nullable=False),
+    sqlalchemy.Column("base_price", sqlalchemy.Numeric(10, 2), nullable=False),
     sqlalchemy.Column("variation", sqlalchemy.String, nullable=False),
-    sqlalchemy.Column("price_change", sqlalchemy.Float, nullable=False),
+    sqlalchemy.Column("price_change", sqlalchemy.Numeric(10, 2), nullable=False),
 )

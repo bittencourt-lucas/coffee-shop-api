@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from decimal import Decimal
 from uuid import UUID
 
 
@@ -6,11 +7,11 @@ from uuid import UUID
 class MenuVariation:
     id: UUID
     variation: str
-    unit_price: float
+    unit_price: Decimal
 
 
 @dataclass
 class MenuItem:
     name: str
-    base_price: float
+    base_price: Decimal
     variations: list[MenuVariation] = field(default_factory=list)

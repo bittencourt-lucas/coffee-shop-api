@@ -6,7 +6,7 @@ from src.core.entities import Product
 
 class AbstractProductRepository(ABC):
     @abstractmethod
-    async def list_all(self) -> list[Product]:
+    async def list_all(self, offset: int = 0, limit: int = 20) -> tuple[list[Product], int]:
         raise NotImplementedError
 
     @abstractmethod

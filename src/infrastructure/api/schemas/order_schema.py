@@ -1,9 +1,13 @@
 from datetime import datetime
+from decimal import Decimal
+from typing import Annotated
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PlainSerializer
 
 from src.core.enums import OrderStatus
+
+_MoneyDecimal = Annotated[Decimal, PlainSerializer(lambda v: str(v.quantize(Decimal("0.01"))))]
 
 
 class OrderCreate(BaseModel):
@@ -17,7 +21,7 @@ class OrderStatusUpdate(BaseModel):
 class OrderResponse(BaseModel):
     id: UUID
     status: OrderStatus
-    total_price: float
+    total_price: _MoneyDecimal
     user_id: UUID
     product_ids: list[UUID]
 
@@ -26,12 +30,19 @@ class OrderItemResponse(BaseModel):
     id: UUID
     name: str
     variation: str
-    unit_price: float
+    unit_price: _MoneyDecimal
 
 
 class OrderDetailResponse(BaseModel):
     id: UUID
     status: OrderStatus
-    total_price: float
+    total_price: _MoneyDecimal
     created_at: datetime
     items: list[OrderItemResponse]
+
+
+class PaginatedOrderResponse(BaseModel):
+    items: list[OrderResponse]
+    total: int
+    page: int
+    page_size: int

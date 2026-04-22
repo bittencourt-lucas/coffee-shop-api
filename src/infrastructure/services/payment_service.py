@@ -1,4 +1,5 @@
 import logging
+from decimal import Decimal
 
 import httpx
 from tenacity import (
@@ -39,9 +40,9 @@ class PaymentService(AbstractPaymentService):
         before_sleep=_log_retry,
         reraise=True,
     )
-    async def _attempt(self, value: float) -> dict:
+    async def _attempt(self, value: Decimal) -> dict:
         async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as client:
-            response = await client.post(settings.payment_url, json={"value": value})
+            response = await client.post(settings.payment_url, json={"value": float(value)})
 
         data = response.json()
         logger.info("HTTP %d: %s", response.status_code, data)
@@ -51,7 +52,7 @@ class PaymentService(AbstractPaymentService):
 
         return data
 
-    async def process(self, value: float) -> dict:
+    async def process(self, value: Decimal) -> dict:
         try:
             return await payment_circuit_breaker.call(self._attempt(value))
         except PaymentFailedError:

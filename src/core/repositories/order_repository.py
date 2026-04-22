@@ -25,3 +25,11 @@ class AbstractOrderRepository(ABC):
     @abstractmethod
     async def update_status(self, order_id: UUID, status: OrderStatus) -> Order:
         raise NotImplementedError
+
+    @abstractmethod
+    async def list_all(self, offset: int = 0, limit: int = 20) -> tuple[list[Order], int]:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_for_user(self, user_id: UUID, offset: int = 0, limit: int = 20) -> tuple[list[Order], int]:
+        raise NotImplementedError
