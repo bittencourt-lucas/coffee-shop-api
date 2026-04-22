@@ -18,6 +18,7 @@ class OrderResponse(BaseModel):
     id: UUID
     status: OrderStatus
     total_price: float
+    user_id: UUID
     product_ids: list[UUID]
 
 

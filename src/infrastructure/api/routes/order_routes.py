@@ -9,6 +9,7 @@ from src.core.exceptions import InvalidProductError, InvalidStatusTransitionErro
 from src.core.repositories import AbstractOrderRepository, AbstractProductRepository, AbstractIdempotencyRepository
 from src.core.services import AbstractNotificationService, AbstractPaymentService
 from src.infrastructure.api.dependencies import (
+    get_current_user,
     get_idempotency_repository,
     get_notification_service,
     get_order_repository,
@@ -16,6 +17,7 @@ from src.infrastructure.api.dependencies import (
     get_product_repository,
     require_roles,
 )
+from src.infrastructure.auth.jwt import TokenData
 from src.infrastructure.api.schemas import (
     OrderCreate,
     OrderDetailResponse,
@@ -34,6 +36,7 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 async def create_order(
     request: Request,
     body: OrderCreate,
+    current_user: TokenData = Depends(get_current_user),
     order_repo: AbstractOrderRepository = Depends(get_order_repository),
     product_repo: AbstractProductRepository = Depends(get_product_repository),
     payment_service: AbstractPaymentService = Depends(get_payment_service),
@@ -41,6 +44,11 @@ async def create_order(
     idempotency_repo: AbstractIdempotencyRepository = Depends(get_idempotency_repository),
 ):
     if idempotency_key:
+        if len(idempotency_key) > 128:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Idempotency-Key must be 128 characters or fewer",
+            )
         cached = await idempotency_repo.get(idempotency_key)
         if cached:
             return JSONResponse(status_code=cached.status_code, content=cached.body)
@@ -48,6 +56,7 @@ async def create_order(
     try:
         order = await CreateOrder(order_repo, product_repo, payment_service).execute(
             product_ids=body.product_ids,
+            user_id=current_user.user_id,
         )
     except InvalidProductError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc))
@@ -65,9 +74,11 @@ async def create_order(
 @router.get("/{order_id}", response_model=OrderDetailResponse)
 async def get_order(
     order_id: UUID,
+    current_user: TokenData = Depends(get_current_user),
     repo: AbstractOrderRepository = Depends(get_order_repository),
 ):
-    order = await GetOrderDetail(repo).execute(order_id)
+    user_id = None if current_user.role == Role.MANAGER else current_user.user_id
+    order = await GetOrderDetail(repo).execute(order_id, user_id=user_id)
     if not order:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Order not found")
     return OrderDetailResponse(
@@ -85,7 +96,7 @@ async def update_order_status(
     body: OrderStatusUpdate,
     repo: AbstractOrderRepository = Depends(get_order_repository),
     notification_service: AbstractNotificationService = Depends(get_notification_service),
-    _: Role = Depends(require_roles(Role.MANAGER)),
+    _: TokenData = Depends(require_roles(Role.MANAGER)),
 ):
     try:
         order = await UpdateOrderStatus(repo, notification_service).execute(order_id, body.status)

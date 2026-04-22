@@ -1,3 +1,4 @@
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -8,15 +9,25 @@ from slowapi.errors import RateLimitExceeded
 from src.infrastructure.api.middleware.rate_limit import limiter
 from src.infrastructure.api.middleware.role_middleware import RoleMiddleware
 from src.infrastructure.database.connection import database
+from src.infrastructure.database.repositories import IdempotencyRepository, RevokedTokenRepository
 from src.infrastructure.database.seed import seed_catalog
 from src.infrastructure.api.routes import menu_router, order_router, healthcheck_router, user_router, auth_router
+from src.infrastructure.tasks.purge_expired import purge_loop
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await database.connect()
     await seed_catalog(database)
+    purge_task = asyncio.create_task(
+        purge_loop(IdempotencyRepository(database), RevokedTokenRepository(database))
+    )
     yield
+    purge_task.cancel()
+    try:
+        await purge_task
+    except asyncio.CancelledError:
+        pass
     await database.disconnect()
 
 

@@ -6,10 +6,10 @@ import pytest
 import sqlalchemy
 from httpx import ASGITransport, AsyncClient
 
-from src.infrastructure.api.dependencies import get_product_repository
+from src.infrastructure.api.dependencies import get_product_repository, get_revoked_token_repository
 from src.infrastructure.api.middleware.rate_limit import limiter
 from src.infrastructure.database.connection import metadata
-from src.infrastructure.database.repositories import ProductRepository
+from src.infrastructure.database.repositories import ProductRepository, RevokedTokenRepository
 from src.infrastructure.database.seed import seed_catalog as real_seed_catalog
 from src.main import app
 
@@ -45,7 +45,7 @@ async def test_db():
 def _make_client(test_db: databases.Database):
     """
     Returns an async context manager that yields an httpx client bound to the app,
-    with the product repository overridden to use the test database.
+    with repositories overridden to use the test database.
     The app's production lifespan (connect + seed) is patched to a no-op so
     the test database is not polluted by the app startup sequence.
     """
@@ -66,6 +66,7 @@ class _ClientContext:
     async def __aenter__(self) -> AsyncClient:
         for p in self._patches:
             p.start()
+        app.dependency_overrides[get_revoked_token_repository] = lambda: RevokedTokenRepository(self._test_db)
         limiter.enabled = False
         self._http = AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
         return await self._http.__aenter__()

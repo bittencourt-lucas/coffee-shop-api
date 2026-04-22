@@ -40,3 +40,9 @@ class IdempotencyRepository(AbstractIdempotencyRepository):
                 response_body=json.dumps(body),
             )
         )
+
+    async def delete_expired(self) -> None:
+        cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - IDEMPOTENCY_TTL
+        await self._db.execute(
+            idempotency_keys_table.delete().where(idempotency_keys_table.c.created_at < cutoff)
+        )

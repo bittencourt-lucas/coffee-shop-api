@@ -14,6 +14,12 @@ orders_table = sqlalchemy.Table(
         server_default=sqlalchemy.func.now(),
         nullable=False,
     ),
+    sqlalchemy.Column(
+        "user_id",
+        sqlalchemy.String,
+        sqlalchemy.ForeignKey("users.id"),
+        nullable=True,
+    ),
 )
 
 order_products_table = sqlalchemy.Table(

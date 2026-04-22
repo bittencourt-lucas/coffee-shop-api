@@ -12,13 +12,15 @@ The project follows Clean Architecture with a Repository Pattern, organized into
 
 ## Authentication
 
-Most endpoints are publicly accessible. Role-protected endpoints (e.g. `PATCH /orders/{id}/status`) require a valid JWT in the `Authorization` header:
+Protected endpoints require a valid JWT Bearer token in the `Authorization` header:
 
 ```
 Authorization: Bearer <token>
 ```
 
-Obtain a token by signing in via `POST /auth/sign-in`. The token encodes the user's role — the middleware extracts it from the token, so no database lookup is needed per request. Requests without a token default to the `CUSTOMER` role. A present but invalid or expired token returns `401`.
+Obtain a token by signing in via `POST /auth/sign-in`. The token encodes the user's ID and role — no database lookup is needed per request. A missing, invalid, or expired token returns `401`. A valid token with an insufficient role returns `403`.
+
+Sign out via `POST /auth/sign-out` to invalidate the token immediately. Revoked tokens are stored in a denylist keyed by `jti` claim and rejected on all subsequent requests, even if not yet expired.
 
 ## Endpoints
 
@@ -26,16 +28,17 @@ Obtain a token by signing in via `POST /auth/sign-in`. The token encodes the use
 |---------|---------------------------|----------------|------------|---------------------------------------------------|
 | `GET`   | `/healthcheck`            | No             | —          | Liveness probe                                    |
 | `GET`   | `/menu`                   | No             | —          | List all products grouped by name with variations |
-| `POST`  | `/users/`                 | No             | —          | Register a new user                               |
-| `GET`   | `/users/{id}`             | No             | —          | Get a user by ID                                  |
+| `POST`  | `/users/`                 | No             | —          | Register a new user (role always `CUSTOMER`)      |
+| `GET`   | `/users/{id}`             | Any valid JWT  | —          | Get a user by ID                                  |
 | `POST`  | `/auth/sign-in`           | No             | —          | Authenticate and receive a JWT                    |
-| `POST`  | `/orders/`                | No             | 10/min     | Create an order and process payment               |
-| `GET`   | `/orders/{id}`            | No             | —          | Get full order details                            |
+| `POST`  | `/auth/sign-out`          | Any valid JWT  | —          | Revoke the current JWT immediately                |
+| `POST`  | `/orders/`                | Any valid JWT  | 10/min     | Create an order and process payment               |
+| `GET`   | `/orders/{id}`            | Any valid JWT  | —          | Get full order details (customers: own orders only) |
 | `PATCH` | `/orders/{id}/status`     | MANAGER token  | —          | Advance order status                              |
 
 ### Idempotency
 
-`POST /orders/` and `POST /users/` support the `Idempotency-Key` request header. Sending the same key on a repeated request returns the original cached response without re-processing. Keys expire after 24 hours.
+`POST /orders/` and `POST /users/` support the `Idempotency-Key` request header. Sending the same key on a repeated request returns the original cached response without re-processing. Keys must be 128 characters or fewer and expire after 24 hours.
 
 ### Order Status Flow
 
@@ -54,11 +57,14 @@ Any out-of-sequence update returns `422`.
 
 ### Security
 
-- **JWT authentication** — Roles are derived from signed HS256 tokens. The secret key and expiration are configurable via environment variables.
-- **Password hashing** — User passwords are hashed with bcrypt before storage. Plaintext passwords are never persisted.
+- **JWT authentication** — Roles are derived from signed HS256 tokens. The secret key and expiration are configurable via environment variables. If the default secret is used at startup, a `CRITICAL` log warning is emitted.
+- **Token revocation** — `POST /auth/sign-out` inserts the token's `jti` claim into a `revoked_tokens` denylist. All subsequent requests with that token return `401`, even if the token has not expired yet. Expired entries are purged automatically every 60 minutes.
+- **Role lockdown** — Registration via `POST /users/` always creates a `CUSTOMER`. There is no self-service path to the `MANAGER` role.
+- **Timing-safe sign-in** — The sign-in path always runs a bcrypt verification, even when the email is not found, to prevent response-time attacks that distinguish existing from non-existing accounts.
+- **Password hashing** — Passwords are hashed with bcrypt before storage. A minimum length of 8 characters is enforced at the API layer. Plaintext passwords are never persisted.
 - **CORS** — Restricted to explicit allowed origins, methods, and headers via `CORSMiddleware`.
 - **Rate limiting** — `POST /orders/` is limited to 10 requests/minute per IP using `slowapi`. Exceeding the limit returns `429 Too Many Requests`.
-- **Input validation** — `product_ids` is capped at 50 items per order to prevent abuse.
+- **Input validation** — `product_ids` is capped at 50 items per order; `Idempotency-Key` headers are capped at 128 characters.
 - **Error sanitization** — External service errors are logged server-side only; clients receive generic error messages.
 - **Structured logging** — Services use Python `logging` instead of `print`.
 - **Configurable secrets** — All external URLs, the database connection string, and the JWT secret key are loaded from environment variables via `pydantic-settings`.
@@ -148,30 +154,30 @@ pytest tests/ --cov=src --cov-report=term-missing
 
 ## Test Coverage
 
-119 tests across unit and integration suites.
+137 tests across unit and integration suites.
 
 ```
-Name                                                             Stmts   Miss  Cover
-------------------------------------------------------------------------------------
-src\core\entities\*                                                 50      0   100%
-src\core\enums\*                                                    13      0   100%
-src\core\exceptions.py                                               9      0   100%
-src\core\services\*                                                  7      0   100%
-src\infrastructure\api\routes\order_routes.py                       32      0   100%
-src\infrastructure\api\routes\user_routes.py                        22      0   100%
-src\infrastructure\api\routes\auth_routes.py                        13      0   100%
-src\infrastructure\api\routes\product_routes.py                     11      0   100%
-src\infrastructure\api\schemas\*                                    46      0   100%
-src\infrastructure\auth\jwt.py                                       8      0   100%
-src\infrastructure\auth\password.py                                  7      0   100%
-src\infrastructure\database\models\*                                11      0   100%
-src\infrastructure\database\repositories\order_repository.py        41      0   100%
-src\infrastructure\database\repositories\user_repository.py         28      0   100%
-src\infrastructure\database\seed.py                                 11      0   100%
-src\infrastructure\services\payment_service.py                      21      0   100%
-src\use_cases\*                                                     80      0   100%
-------------------------------------------------------------------------------------
-TOTAL                                                              510     38    93%
+Name                                                                   Stmts   Miss  Cover
+-------------------------------------------------------------------------------------------
+src\core\entities\*                                                       66      0   100%
+src\core\enums\*                                                          13      0   100%
+src\core\exceptions.py                                                    15      0   100%
+src\core\services\*                                                        7      0   100%
+src\infrastructure\api\routes\order_routes.py                             49      0   100%
+src\infrastructure\api\routes\user_routes.py                              33      0   100%
+src\infrastructure\api\routes\auth_routes.py                              18      0   100%
+src\infrastructure\api\routes\product_routes.py                           10      0   100%
+src\infrastructure\api\schemas\*                                          55      0   100%
+src\infrastructure\auth\jwt.py                                            23      2    91%
+src\infrastructure\auth\password.py                                        6      0   100%
+src\infrastructure\database\models\*                                      19      0   100%
+src\infrastructure\database\repositories\order_repository.py              47      1    98%
+src\infrastructure\database\repositories\user_repository.py               29      2    93%
+src\infrastructure\database\seed.py                                       11      0   100%
+src\infrastructure\services\payment_service.py                            23      0   100%
+src\use_cases\*                                                           91      0   100%
+-------------------------------------------------------------------------------------------
+TOTAL                                                                    852     65    92%
 ```
 
-Overall coverage: **93%**. Uncovered lines are limited to abstract method stubs, the app lifespan startup/shutdown hooks, and the notification service's live HTTP path (intentionally not exercised in tests, as the service is mocked via dependency injection).
+Overall coverage: **92%**. Uncovered lines are limited to abstract method stubs, the app lifespan startup/shutdown hooks, the background purge loop's sleep iteration, and the notification service's live HTTP path (intentionally not exercised in tests, as the service is mocked via dependency injection).

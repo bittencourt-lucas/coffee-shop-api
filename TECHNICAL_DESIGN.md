@@ -18,9 +18,10 @@
   - [4.3 Create User](#43-create-user)
   - [4.4 Get User](#44-get-user)
   - [4.5 Sign In](#45-sign-in)
-  - [4.6 Create Order](#46-create-order)
-  - [4.7 Get Order Detail](#47-get-order-detail)
-  - [4.8 Update Order Status](#48-update-order-status)
+  - [4.6 Sign Out](#46-sign-out)
+  - [4.7 Create Order](#47-create-order)
+  - [4.8 Get Order Detail](#48-get-order-detail)
+  - [4.9 Update Order Status](#49-update-order-status)
 - [5. Core Domain Model](#5-core-domain-model)
   - [5.1 Entities](#51-entities)
   - [5.2 Order Status State Machine](#52-order-status-state-machine)
@@ -38,8 +39,10 @@
   - [8.3 Input Validation](#83-input-validation)
   - [8.4 Error Sanitization](#84-error-sanitization)
   - [8.5 HTTP Timeouts](#85-http-timeouts)
-  - [8.6 JWT Authentication and Role Extraction](#86-jwt-authentication-and-role-extraction)
+  - [8.6 JWT Authentication and Route Guards](#86-jwt-authentication-and-route-guards)
   - [8.7 Password Security](#87-password-security)
+  - [8.8 Token Revocation](#88-token-revocation)
+  - [8.9 Role Lockdown on Registration](#89-role-lockdown-on-registration)
 - [9. Database Design](#9-database-design)
   - [9.1 Schema](#91-schema)
   - [9.2 Migrations](#92-migrations)
@@ -95,10 +98,11 @@ src/
 │   ├── entities/                  # Product, Order, OrderDetail, OrderItem, MenuItem, MenuVariation, User
 │   ├── enums/                     # OrderStatus, Role
 │   ├── repositories/              # AbstractProductRepository, AbstractOrderRepository,
-│   │                              # AbstractUserRepository, AbstractIdempotencyRepository
+│   │                              # AbstractUserRepository, AbstractIdempotencyRepository,
+│   │                              # AbstractRevokedTokenRepository
 │   ├── services/                  # AbstractPaymentService, AbstractNotificationService
 │   └── exceptions.py              # InvalidProductError, InvalidStatusTransitionError,
-│                                  # PaymentFailedError, InvalidCredentialsError
+│                                  # PaymentFailedError, InvalidCredentialsError, DuplicateEmailError
 │
 ├── use_cases/                     # Application business rules
 │   ├── order/                     # CreateOrder, GetOrderDetail, UpdateOrderStatus
@@ -112,15 +116,17 @@ src/
 │   │   ├── middleware/            # RoleMiddleware (JWT extraction), rate_limit (slowapi)
 │   │   └── dependencies.py       # DI wiring and role authorization
 │   ├── auth/
-│   │   ├── jwt.py                 # create_access_token (python-jose, HS256)
-│   │   └── password.py            # hash_password / verify_password (bcrypt)
+│   │   ├── jwt.py                 # create_access_token, decode_access_token, TokenData (python-jose, HS256)
+│   │   └── password.py            # hash_password / verify_password / DUMMY_HASH (bcrypt)
 │   ├── database/
 │   │   ├── models/                # SQLAlchemy table definitions
 │   │   ├── repositories/          # Concrete repository implementations
 │   │   ├── connection.py          # Database instance and metadata
 │   │   └── seed.py                # Product catalog seeding
 │   ├── services/                  # PaymentService (with retries), NotificationService (fire-and-forget)
-│   └── settings.py                # pydantic-settings configuration
+│   ├── tasks/
+│   │   └── purge_expired.py       # Background loop: deletes expired idempotency keys and revoked tokens
+│   └── settings.py                # pydantic-settings configuration (warns on default JWT secret)
 │
 └── main.py                        # App entry point, lifespan, middleware registration
 ```
@@ -173,11 +179,14 @@ The API uses JWT (JSON Web Tokens) for authentication and role-based access cont
 {
   "sub": "<user_id>",
   "role": "CUSTOMER",
+  "jti": "<uuid>",
   "exp": 1749000000
 }
 ```
 
-**Role extraction**: `RoleMiddleware` decodes the token from the `Authorization: Bearer <token>` header on every request and sets `request.state.role`. No database lookup is needed — the role is embedded directly in the token claims. If no token is present, the middleware defaults to `Role.CUSTOMER`, allowing public endpoints to remain accessible without authentication. If a token is present but invalid or expired, the middleware returns `401` immediately.
+The `jti` (JWT ID) claim is a unique UUID minted at token creation time. It is used as the denylist key for token revocation (see [Section 8.8](#88-token-revocation)).
+
+**Route guards**: Protected endpoints declare `get_current_user` as a FastAPI dependency. `get_current_user` extracts the Bearer token, decodes it, checks the `jti` against the `revoked_tokens` denylist, and returns a `TokenData(user_id, role, jti)` dataclass. A missing or invalid token returns `401`; an insufficient role returns `403`. `RoleMiddleware` remains registered but only sets `request.state.role` as a fallback for middleware-layer checks — it no longer drives access control on protected routes.
 
 **Configuration** (all overridable via `COFFEE_SHOP_*` environment variables):
 
@@ -187,9 +196,11 @@ The API uses JWT (JSON Web Tokens) for authentication and role-based access cont
 | `jwt_algorithm` | `HS256` | Signing algorithm |
 | `jwt_expiration_minutes` | `60` | Token lifetime |
 
+If the application starts with the default `jwt_secret_key` value, a `CRITICAL` log warning is emitted via `Settings.warn_default_jwt_secret` (a Pydantic `model_validator`). The app does not abort — this ensures development convenience while making the misconfiguration impossible to miss in logs.
+
 **Trade-offs of embedding role in the token:**
 - **Pro**: No per-request database lookup; horizontally scalable without shared session state.
-- **Con**: If a user's role is changed in the database, their existing token still carries the old role until it expires. A production system may need a token revocation mechanism (e.g., a denylist in Redis) or shorter token lifetimes to bound this window.
+- **Con**: If a user's role changes in the database, their existing token retains the old role until expiry. Because registration always assigns `CUSTOMER` and there is no self-service role-change endpoint, this window is only a concern when a manager manually updates a role in the database.
 
 ### 3.4 Other Dependencies
 
@@ -260,16 +271,19 @@ Products are grouped by name and base price. Each variation's `unit_price` is ca
 
 | Header | Required | Description |
 |---|---|---|
-| `Idempotency-Key` | No | If provided, the response is cached for 24 hours. A repeated request with the same key returns the cached response. |
+| `Idempotency-Key` | No | If provided, the response is cached for 24 hours. A repeated request with the same key returns the cached response. Must be ≤ 128 characters. |
 
 **Request**:
 ```json
 {
   "email": "user@example.com",
-  "password": "securepassword",
-  "role": "CUSTOMER"
+  "password": "securepassword"
 }
 ```
+
+`role` is intentionally absent from the request body. All registrations produce a `CUSTOMER`. There is no self-service path to `MANAGER`.
+
+`password` must be at least 8 characters (enforced by Pydantic `min_length=8`).
 
 **Response** (`201 Created`):
 ```json
@@ -286,8 +300,9 @@ The `password_hash` is never included in any response. The password is hashed wi
 
 | Status | Condition |
 |---|---|
-| `409` | Email already registered |
-| `422` | Missing or invalid fields |
+| `400` | `Idempotency-Key` header exceeds 128 characters |
+| `409` | Email already registered (`DuplicateEmailError` from the repository layer) |
+| `422` | Missing or invalid fields (including password shorter than 8 characters) |
 
 ### 4.4 Get User
 
@@ -295,7 +310,7 @@ The `password_hash` is never included in any response. The password is hashed wi
 |---|---|
 | **Method** | `GET` |
 | **Path** | `/users/{user_id}` |
-| **Auth** | None |
+| **Auth** | Any valid JWT |
 | **Rate Limit** | None |
 
 **Response** (`200 OK`):
@@ -311,6 +326,7 @@ The `password_hash` is never included in any response. The password is hashed wi
 
 | Status | Condition |
 |---|---|
+| `401` | Missing, invalid, expired, or revoked token |
 | `404` | User not found |
 
 ### 4.5 Sign In
@@ -347,22 +363,43 @@ Use the returned token in subsequent requests as `Authorization: Bearer <token>`
 | `401` | Invalid email or password |
 | `422` | Missing or invalid fields |
 
-Both "email not found" and "wrong password" return `401` with the same generic message to prevent user enumeration.
+Both "email not found" and "wrong password" return `401` with the same generic message to prevent user enumeration. The implementation is timing-safe: `verify_password` is called against a `DUMMY_HASH` even when the email does not exist, so response time does not reveal account existence.
 
-### 4.6 Create Order
+### 4.6 Sign Out
+
+| Property | Value |
+|---|---|
+| **Method** | `POST` |
+| **Path** | `/auth/sign-out` |
+| **Auth** | Any valid JWT |
+| **Rate Limit** | None |
+
+Revokes the current token immediately by inserting its `jti` claim into the `revoked_tokens` denylist. All subsequent requests using the same token return `401`, even if the token has not yet reached its `exp` timestamp.
+
+**Response**: `204 No Content`
+
+**Error Responses**:
+
+| Status | Condition |
+|---|---|
+| `401` | Token is missing, invalid, expired, or already revoked |
+
+Calling sign-out twice with the same token is handled gracefully — the second call also returns `401` (the token is already revoked, so the auth guard rejects it before the sign-out handler runs).
+
+### 4.7 Create Order
 
 | Property | Value |
 |---|---|
 | **Method** | `POST` |
 | **Path** | `/orders/` |
-| **Auth** | None (defaults to `CUSTOMER` role) |
+| **Auth** | Any valid JWT |
 | **Rate Limit** | 10 requests/minute per IP |
 
 **Headers**:
 
 | Header | Required | Description |
 |---|---|---|
-| `Idempotency-Key` | No | If provided, the response is cached for 24 hours. A repeated request with the same key returns the cached response without re-charging payment. |
+| `Idempotency-Key` | No | If provided, the response is cached for 24 hours. A repeated request with the same key returns the cached response without re-charging payment. Must be ≤ 128 characters. |
 
 **Request**:
 ```json
@@ -378,28 +415,35 @@ Both "email not found" and "wrong password" return `401` with the same generic m
   "id": "uuid",
   "status": "WAITING",
   "total_price": 8.50,
-  "product_ids": ["uuid-1", "uuid-2"]
+  "product_ids": ["uuid-1", "uuid-2"],
+  "user_id": "<user-uuid>"
 }
 ```
+
+The `user_id` is taken from the authenticated JWT claim — clients cannot supply or override it.
 
 **Error Responses**:
 
 | Status | Condition |
 |---|---|
+| `400` | `Idempotency-Key` header exceeds 128 characters |
+| `401` | Missing, invalid, expired, or revoked token |
 | `422` | Invalid/missing product IDs |
 | `429` | Rate limit exceeded |
 | `502` | Payment processing failed after retries |
 
-**Flow**: Check idempotency cache (return cached response if hit) → validate products exist → calculate total → process payment (3 retries) → persist order atomically → save to idempotency cache → return response. Only successful (2xx) responses are cached; errors are never stored, allowing the client to retry a failed request with the same key.
+**Flow**: Authenticate JWT (401 if invalid) → check idempotency key length → check idempotency cache (return cached response if hit) → validate products exist → calculate total → process payment (3 retries) → persist order with `user_id` → save to idempotency cache → return response. Only successful (2xx) responses are cached; errors are never stored, allowing the client to retry a failed request with the same key.
 
-### 4.7 Get Order Detail
+### 4.8 Get Order Detail
 
 | Property | Value |
 |---|---|
 | **Method** | `GET` |
 | **Path** | `/orders/{order_id}` |
-| **Auth** | None |
+| **Auth** | Any valid JWT |
 | **Rate Limit** | None |
+
+**Ownership scoping**: Customers can only retrieve their own orders. If a customer requests an order belonging to another user, the response is `404` (not `403`) to avoid revealing that the order ID exists. Managers can retrieve any order.
 
 **Response** (`200 OK`):
 ```json
@@ -418,9 +462,10 @@ Both "email not found" and "wrong password" return `401` with the same generic m
 
 | Status | Condition |
 |---|---|
-| `404` | Order not found |
+| `401` | Missing, invalid, expired, or revoked token |
+| `404` | Order not found or not owned by the requesting customer |
 
-### 4.8 Update Order Status
+### 4.9 Update Order Status
 
 | Property | Value |
 |---|---|
@@ -464,7 +509,7 @@ Both "email not found" and "wrong password" return `401` with the same generic m
 All entities are Python dataclasses defined in `src/core/entities/`. They have no framework dependencies.
 
 - **Product**: `id`, `name`, `base_price`, `variation`, `price_change`
-- **Order**: `id`, `status`, `total_price`, `product_ids`
+- **Order**: `id`, `status`, `total_price`, `product_ids`, `user_id`
 - **OrderDetail**: `id`, `status`, `total_price`, `created_at`, `items` (list of `OrderItem`)
 - **OrderItem**: `id`, `name`, `variation`, `unit_price`
 - **MenuItem**: `name`, `base_price`, `variations` (list of `MenuVariation`)
@@ -511,9 +556,10 @@ Roles are stored in the `users` table and embedded in JWT claims at sign-in time
 Abstract interfaces are defined in `src/core/repositories/` using Python ABCs. Concrete implementations live in `src/infrastructure/database/repositories/`. This decouples the domain logic from the database:
 
 - `AbstractProductRepository` defines `list_all()` and `get_by_ids()`
-- `AbstractOrderRepository` defines `create()`, `get_by_id()`, `get_detail_by_id()`, and `update_status()`
+- `AbstractOrderRepository` defines `create()`, `get_by_id()`, `get_detail_by_id()`, `get_detail_by_id_for_user()`, and `update_status()`
 - `AbstractUserRepository` defines `create()`, `get_by_id()`, `get_by_email()`, and `list_all()`
-- `AbstractIdempotencyRepository` defines `get(key)` and `save(key, status_code, body)` — used exclusively at the API layer, not inside use cases
+- `AbstractIdempotencyRepository` defines `get(key)`, `save(key, status_code, body)`, and `delete_expired()` — used exclusively at the API layer and background purge task, not inside use cases
+- `AbstractRevokedTokenRepository` defines `revoke(jti, expires_at)`, `is_revoked(jti)`, and `delete_expired()`
 
 The same approach applies to external services (`AbstractPaymentService`, `AbstractNotificationService`). This enables straightforward testing — tests inject mocks or stubs without touching the database or external APIs.
 
@@ -521,21 +567,22 @@ The same approach applies to external services (`AbstractPaymentService`, `Abstr
 
 Each use case is a single-responsibility class with an `execute()` method:
 
-- `CreateOrder.execute(product_ids)` — validates, calculates, pays, persists
-- `GetOrderDetail.execute(order_id)` — retrieves full order with item details
+- `CreateOrder.execute(product_ids, user_id)` — validates, calculates, pays, persists with owner
+- `GetOrderDetail.execute(order_id, user_id=None)` — retrieves full order; when `user_id` is provided (customers), scopes the query to that owner only
 - `UpdateOrderStatus.execute(order_id, new_status)` — validates transition, updates, notifies
 - `GetMenu.execute()` — fetches and groups products into menu items
-- `CreateUser.execute(email, role, password)` — hashes password, creates user with a new UUID
+- `CreateUser.execute(email, password)` — hashes password, creates user with a new UUID and hard-coded `CUSTOMER` role
 - `GetUser.execute(user_id)` — retrieves a user by ID or returns `None`
-- `SignIn.execute(email, password)` — verifies credentials, returns a signed JWT
+- `SignIn.execute(email, password)` — timing-safe credential verification, returns a signed JWT
 
 ### 6.3 Dependency Injection
 
 All wiring happens in `src/infrastructure/api/dependencies.py`. FastAPI's `Depends()` system provides:
 
-- **Repositories**: `get_product_repository()`, `get_order_repository()`, `get_user_repository()`, `get_idempotency_repository()` — instantiated with the database connection
+- **Repositories**: `get_product_repository()`, `get_order_repository()`, `get_user_repository()`, `get_idempotency_repository()`, `get_revoked_token_repository()` — instantiated with the database connection
 - **Services**: `get_payment_service()`, `get_notification_service()` — instantiated per request
-- **Authorization**: `require_roles(*allowed_roles)` — returns a dependency that checks `request.state.role` (set by `RoleMiddleware` from the JWT) and raises `403` if unauthorized
+- **Auth**: `get_current_user` — decodes the Bearer token, checks the `jti` against `revoked_tokens`, and returns `TokenData(user_id, role, jti)`; raises `401` on any failure
+- **Authorization**: `require_roles(*allowed_roles)` — wraps `get_current_user` and additionally checks the role; raises `403` if the role is not in the allowed set
 
 Tests override these dependencies via `app.dependency_overrides` to inject mocks.
 
@@ -606,6 +653,11 @@ Pydantic models enforce:
 - `status` must be a valid `OrderStatus` enum value
 - `order_id` and `user_id` path parameters must be valid UUIDs
 - `email` fields are validated as proper email addresses via `EmailStr`
+- `password` must be at least 8 characters (`Field(min_length=8)` on `UserCreate`)
+
+Route-level guards enforce:
+
+- `Idempotency-Key` header must be ≤ 128 characters on both `POST /users/` and `POST /orders/`; requests with a longer key are rejected with `400` before any database interaction
 
 Invalid payloads are automatically rejected with `422 Unprocessable Entity` before reaching route handler logic.
 
@@ -624,20 +676,20 @@ This prevents information leakage that could help an attacker understand the sys
 
 All outbound HTTP calls (payment, notification) use a 10-second timeout. This prevents the application from hanging indefinitely if an external service becomes unresponsive.
 
-### 8.6 JWT Authentication and Role Extraction
+### 8.6 JWT Authentication and Route Guards
 
-`RoleMiddleware` (`src/infrastructure/api/middleware/role_middleware.py`) runs on every request and follows this logic:
+Protected endpoints declare `get_current_user` as a FastAPI `Depends()`. It follows this logic:
 
-1. If no `Authorization` header is present: set `request.state.role = Role.CUSTOMER` and proceed.
-2. If the header is present but does not start with `Bearer `: return `401`.
-3. Decode the token using the configured secret key and algorithm.
-4. Extract the `role` claim and set `request.state.role`.
-5. If decoding fails (expired, tampered, wrong key, missing claim): return `401`.
+1. Extract the `Authorization: Bearer <token>` header via `HTTPBearer()`. If absent, return `401`.
+2. Decode the token using `decode_access_token(token)` — verifies the signature, algorithm, and expiry.
+3. Check `is_revoked(jti)` against the `revoked_tokens` table. If revoked, return `401`.
+4. Return `TokenData(user_id, role, jti)` to the route handler.
 
-This design means:
-- Public endpoints (menu, order creation, user registration, sign-in) work without any token.
-- Role-protected endpoints use `require_roles()` which checks `request.state.role`.
-- The role cannot be forged by a client because it is extracted from the cryptographically signed token, not from a plain request header.
+`require_roles(*allowed_roles)` builds on top of `get_current_user` and additionally raises `403` if the token's role is not in the allowed set.
+
+`RoleMiddleware` (`src/infrastructure/api/middleware/role_middleware.py`) remains registered and still sets `request.state.role` from the token (or defaults to `CUSTOMER` if no token is present). It no longer drives access control on any route — its role in the current codebase is limited to the middleware layer, providing `request.state.role` for potential future middleware-level checks.
+
+Public endpoints (`GET /menu`, `POST /users/`, `POST /auth/sign-in`, `GET /healthcheck`) have no `get_current_user` dependency and are accessible without a token.
 
 ### 8.7 Password Security
 
@@ -645,7 +697,26 @@ Passwords are handled as follows:
 
 - `hash_password(plain)` — calls `bcrypt.hashpw` with a freshly generated salt. The cost factor is bcrypt's default (12 rounds), making brute-force attacks expensive.
 - `verify_password(plain, hashed)` — calls `bcrypt.checkpw` in constant time to prevent timing attacks.
+- `DUMMY_HASH` — a pre-computed bcrypt hash used in the sign-in flow when the queried email does not exist. Calling `verify_password(password, DUMMY_HASH)` before raising `InvalidCredentialsError` equalizes response time regardless of whether the email is registered, defeating timing-based user enumeration attacks.
+- Minimum password length of 8 characters is enforced at the API layer via `UserCreate.password = Field(min_length=8)`.
 - The `password_hash` field is part of the `User` entity but is never included in any Pydantic response schema (`UserResponse` only exposes `id`, `email`, `role`).
+
+### 8.8 Token Revocation
+
+Token revocation is implemented via a `revoked_tokens` database table acting as a `jti` denylist:
+
+| Column | Type | Description |
+|---|---|---|
+| `jti` | String (UUID) | Primary key — the JWT ID claim |
+| `expires_at` | DateTime | The token's original `exp` value |
+
+**Sign-out flow**: `POST /auth/sign-out` extracts `jti` and `exp` from the token and inserts a row. Subsequent requests with that token are rejected by `get_current_user`'s `is_revoked(jti)` check.
+
+**Purge**: A background `asyncio.create_task` loop (`src/infrastructure/tasks/purge_expired.py`) runs `delete_expired()` on both `revoked_tokens` and `idempotency_keys` every 60 minutes, removing rows whose `expires_at`/`created_at` have passed the TTL threshold. This prevents unbounded table growth without requiring an external scheduler.
+
+### 8.9 Role Lockdown on Registration
+
+`POST /users/` accepts `email` and `password` only. The `role` field is absent from `UserCreate` — it is not a free parameter clients can set. The `CreateUser` use case hard-codes `Role.CUSTOMER` on every new user. Assigning the `MANAGER` role requires a direct database update; there is no API endpoint for role escalation.
 
 ---
 
@@ -673,6 +744,7 @@ Five tables:
 | `status` | String | NOT NULL |
 | `total_price` | Float | NOT NULL |
 | `created_at` | DateTime | NOT NULL, server default: now() |
+| `user_id` | String (UUID) | NOT NULL, Foreign Key → users.id |
 
 **`order_products`** (junction table)
 
@@ -699,7 +771,16 @@ Five tables:
 | `response_body` | Text (JSON) | NOT NULL |
 | `created_at` | DateTime | NOT NULL, server default: now() |
 
-Idempotency entries older than 24 hours are treated as expired and ignored on lookup (no background purge — expired rows are simply skipped by the TTL check in `IdempotencyRepository.get()`).
+Idempotency entries older than 24 hours are treated as expired and ignored on lookup. Expired rows are purged every 60 minutes by the background `purge_loop` task.
+
+**`revoked_tokens`**
+
+| Column | Type | Constraints |
+|---|---|---|
+| `jti` | String (UUID) | Primary Key |
+| `expires_at` | DateTime | NOT NULL |
+
+Stores the `jti` claim of revoked JWTs alongside their original expiry. The `expires_at` value lets the purge loop delete rows that have naturally passed their expiry — once a token can no longer be used anyway, keeping its denylist entry wastes storage.
 
 UUIDs are stored as strings because SQLite has no native UUID type. The repository layer handles conversion between `str` and `uuid.UUID`.
 
@@ -713,6 +794,8 @@ Managed by Alembic. Migration history:
 4. **Add users table** — creates the users table with `id`, `email` (unique), and `role`
 5. **Add idempotency_keys table** — creates the idempotency_keys table
 6. **Add password_hash to users** — adds the `password_hash` NOT NULL column to the users table
+7. **Add user_id to orders** — adds the `user_id` column (FK → users.id, nullable in migration for back-compat, enforced NOT NULL in the application layer for new orders)
+8. **Create revoked_tokens table** — creates the `revoked_tokens` table with `jti` and `expires_at`
 
 Run migrations with: `alembic upgrade head`
 
@@ -741,22 +824,23 @@ Seeding is idempotent — if the table already has data, it is skipped entirely.
 Client
   │
   ▼
-POST /users/ { email, password, role }  [Idempotency-Key: <key>]
+POST /users/ { email, password }  [Idempotency-Key: <key>]
   │
-  ├─ RoleMiddleware: no token → role = CUSTOMER
-  ├─ 0. IdempotencyRepository.get(key) ──► Cache hit → return cached 201
+  ├─ 0a. Key length check: len(key) > 128 → 400 Bad Request
+  ├─ 0b. IdempotencyRepository.get(key) ──► Cache hit → return cached 201
   │
   ▼
-CreateUser.execute(email, role, password)
+CreateUser.execute(email, password)
   │
   ├─ 1. hash_password(password) ──► bcrypt hash
-  ├─ 2. UserRepository.create(user) ──► INSERT into users
-  │     └─ Unique constraint violation → 409 Conflict
+  ├─ 2. role = Role.CUSTOMER (hard-coded — not from request)
+  ├─ 3. UserRepository.create(user) ──► INSERT into users
+  │     └─ sqlite3.IntegrityError (UNIQUE) → DuplicateEmailError → 409 Conflict
   │
-  ├─ 3. IdempotencyRepository.save(key, 201, body) ──► Cache response
+  ├─ 4. IdempotencyRepository.save(key, 201, body) ──► Cache response
   │
   ▼
-201 Created { id, email, role }
+201 Created { id, email, role: "CUSTOMER" }
 
 ── Sign-In ────────────────────────────────────────────────────────
 Client
@@ -767,16 +851,31 @@ POST /auth/sign-in { email, password }
   ▼
 SignIn.execute(email, password)
   │
-  ├─ 1. UserRepository.get_by_email(email) ──► Fetch user
-  │     └─ Not found → InvalidCredentialsError → 401
+  ├─ 1. UserRepository.get_by_email(email) ──► Fetch user (may be None)
   │
-  ├─ 2. verify_password(password, user.password_hash) ──► bcrypt.checkpw
-  │     └─ Mismatch → InvalidCredentialsError → 401
+  ├─ 2. hash_to_check = user.password_hash if user else DUMMY_HASH
+  ├─ 3. verify_password(password, hash_to_check) ──► bcrypt.checkpw (always runs)
+  │     └─ Mismatch or user is None → InvalidCredentialsError → 401
   │
-  ├─ 3. create_access_token(user.id, user.role) ──► JWT signed with HS256
+  ├─ 4. create_access_token(user.id, user.role) ──► JWT with sub, role, jti, exp
   │
   ▼
 200 OK { access_token: "<jwt>", token_type: "bearer" }
+
+── Sign-Out ───────────────────────────────────────────────────────
+Client
+  │
+  ▼
+POST /auth/sign-out
+  Authorization: Bearer <token>
+  │
+  ├─ get_current_user: decode JWT → extract jti, exp → check is_revoked(jti)
+  │     └─ Invalid/expired/revoked → 401
+  │
+  ├─ RevokedTokenRepository.revoke(jti, expires_at) ──► INSERT into revoked_tokens
+  │
+  ▼
+204 No Content
 ```
 
 ### 10.2 Order Creation
@@ -786,15 +885,18 @@ Client
   │
   ▼
 POST /orders/ { product_ids: [...] }  [Idempotency-Key: <key>]
+  Authorization: Bearer <token>
   │
-  ├─ RoleMiddleware: decode JWT (or default CUSTOMER)
+  ├─ get_current_user: decode JWT → extract user_id, role, jti → check is_revoked(jti)
+  │     └─ Invalid/expired/revoked → 401
   ├─ Rate Limiter: check 10/min per IP
   │
-  ├─ 0. IdempotencyRepository.get(key) ──► Check cache (if key present)
-  │     └─ Cache hit → return cached 201 response immediately
+  ├─ 0a. Key length check: len(key) > 128 → 400 Bad Request
+  ├─ 0b. IdempotencyRepository.get(key) ──► Check cache (if key present)
+  │      └─ Cache hit → return cached 201 response immediately
   │
   ▼
-CreateOrder.execute(product_ids)
+CreateOrder.execute(product_ids, user_id)
   │
   ├─ 1. ProductRepository.get_by_ids() ──► Validate all IDs exist
   │     └─ If missing → InvalidProductError → 422
@@ -806,13 +908,13 @@ CreateOrder.execute(product_ids)
   │     └─ If all fail → PaymentFailedError → 502
   │
   ├─ 4. OrderRepository.create(order) ──► Atomic DB transaction
-  │     ├─ INSERT into orders
+  │     ├─ INSERT into orders (includes user_id)
   │     └─ INSERT into order_products (one row per product)
   │
   ├─ 5. IdempotencyRepository.save(key, 201, body) ──► Cache response
   │
   ▼
-201 Created { id, status: "WAITING", total_price, product_ids }
+201 Created { id, status: "WAITING", total_price, product_ids, user_id }
 ```
 
 ### 10.3 Status Update
@@ -824,8 +926,10 @@ Client (MANAGER)
 PATCH /orders/{id}/status { status: "PREPARATION" }
   Authorization: Bearer <manager-jwt>
   │
-  ├─ RoleMiddleware: decode JWT → role = MANAGER
-  ├─ require_roles(MANAGER): verify role → 403 if not MANAGER
+  ├─ require_roles(MANAGER):
+  │     ├─ get_current_user: decode JWT → check is_revoked(jti) → return TokenData
+  │     │     └─ Invalid/expired/revoked → 401
+  │     └─ verify role == MANAGER → 403 if not MANAGER
   │
   ▼
 UpdateOrderStatus.execute(order_id, new_status)
@@ -855,9 +959,7 @@ The following choices were made intentionally to keep the project simple and foc
 
 **SQLite as the database**: Chosen for zero-configuration portability. See [Section 3.2](#32-sqlite) for the full discussion. A production deployment must use a proper RDBMS (PostgreSQL recommended) to support concurrent access, replication, and proper data types.
 
-**No user identity on orders**: Orders are not associated with any user ID. Anyone who knows an order's UUID can view or update it. In production, orders must be tied to authenticated users, and access must be scoped — customers should only see their own orders.
-
-**Role baked into JWT at sign-in**: If a user's role changes in the database, their existing token retains the old role until expiry. For a short-lived demo this is acceptable, but production would need a token revocation mechanism or very short token lifetimes.
+**Role baked into JWT at sign-in**: If a user's role changes in the database, their existing token retains the old role until expiry. Because registration always assigns `CUSTOMER` and there is no self-service role-change endpoint, this window is only a concern when a manager manually updates a role in the database. Token revocation via `POST /auth/sign-out` allows forcing a re-login when needed.
 
 ### 11.2 Known Limitations
 
@@ -871,11 +973,9 @@ The following choices were made intentionally to keep the project simple and foc
 
 **Rate limiting by IP only**: Behind a reverse proxy or NAT, many clients may share the same IP address, causing legitimate users to be rate-limited. In production, rate limiting should be tied to authenticated user identity or API keys.
 
-**Single CORS origin**: Only `http://localhost:3000` is allowed. This must be configurable for real deployments.
+**Single CORS origin**: Only `http://localhost:3000` is allowed. The allowed origins list should be configurable via environment variables for production deployments.
 
 **No request logging or tracing**: While the payment and notification services log their operations, there is no structured request logging, correlation IDs, or distributed tracing. Production APIs need observability through request logs, metrics, and traces.
-
-**Expired idempotency keys are never purged**: Rows older than 24 hours are ignored at read time but remain in the database indefinitely. A background job or scheduled SQL DELETE would be needed to reclaim storage.
 
 ### 11.3 Production Readiness Checklist
 
@@ -884,12 +984,14 @@ If this project were to go live, the following changes would need to be implemen
 | Area | Current State | Required Change |
 |---|---|---|
 | **Database** | SQLite (file-based) | PostgreSQL with connection pooling |
-| **JWT secret** | Default `change-me-in-production` | Strong random secret via secrets manager |
-| **Token revocation** | None | Token denylist (Redis) or short-lived tokens with refresh |
-| **Authorization scope** | Role only; no ownership checks | Associate orders with user IDs; scope access by owner |
+| **JWT secret** | Default warned via `CRITICAL` log | Strong random secret via secrets manager |
+| **Token revocation** | ✅ SQLite denylist; 60-min background purge | For high-scale: move denylist to Redis for sub-millisecond lookup |
+| **Authorization scope** | ✅ Orders tied to `user_id`; customers scoped to own orders | — |
+| **Role lockdown** | ✅ Registration always `CUSTOMER`; no self-service escalation | — |
+| **Password security** | ✅ bcrypt, min 8 chars, timing-safe sign-in | — |
 | **Payment retries** | Immediate, 3 attempts | Exponential backoff with jitter; circuit breaker |
 | **Notifications** | Fire-and-forget | Message queue (RabbitMQ/SQS) or outbox pattern |
-| **Idempotency** | `POST /orders/` and `POST /users/`; no key purge | Add periodic cleanup of expired keys |
+| **Idempotency** | ✅ `POST /orders/` and `POST /users/`; 60-min purge; 128-char key limit | — |
 | **Price precision** | Python `float` | `Decimal` types end-to-end |
 | **CORS** | Hardcoded localhost | Configurable via environment variables |
 | **Rate limiting** | Per-IP only | Per-user or per-API-key |

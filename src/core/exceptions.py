@@ -17,3 +17,7 @@ class InvalidProductError(Exception):
 
 class InvalidCredentialsError(Exception):
     pass
+
+
+class DuplicateEmailError(Exception):
+    pass

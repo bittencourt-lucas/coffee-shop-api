@@ -18,7 +18,7 @@ class CreateOrder:
         self._product_repository = product_repository
         self._payment_service = payment_service
 
-    async def execute(self, product_ids: list[UUID]) -> Order:
+    async def execute(self, product_ids: list[UUID], user_id: UUID) -> Order:
         products = await self._product_repository.get_by_ids(product_ids)
 
         if len(products) != len(product_ids):
@@ -36,6 +36,7 @@ class CreateOrder:
             id=uuid4(),
             status=OrderStatus.WAITING,
             total_price=total_price,
+            user_id=user_id,
             product_ids=product_ids,
         )
         return await self._order_repository.create(order)

@@ -20,6 +20,7 @@ class OrderRepository(AbstractOrderRepository):
                     id=str(order.id),
                     status=order.status.value,
                     total_price=order.total_price,
+                    user_id=str(order.user_id),
                 )
             )
             if order.product_ids:
@@ -44,6 +45,23 @@ class OrderRepository(AbstractOrderRepository):
     async def get_detail_by_id(self, order_id: UUID) -> OrderDetail | None:
         row = await self._db.fetch_one(
             orders_table.select().where(orders_table.c.id == str(order_id))
+        )
+        if not row:
+            return None
+        items = await self._fetch_order_items(order_id)
+        return OrderDetail(
+            id=UUID(row["id"]),
+            status=OrderStatus(row["status"]),
+            total_price=row["total_price"],
+            created_at=row["created_at"],
+            items=items,
+        )
+
+    async def get_detail_by_id_for_user(self, order_id: UUID, user_id: UUID) -> OrderDetail | None:
+        row = await self._db.fetch_one(
+            orders_table.select().where(
+                (orders_table.c.id == str(order_id)) & (orders_table.c.user_id == str(user_id))
+            )
         )
         if not row:
             return None
@@ -105,5 +123,6 @@ class OrderRepository(AbstractOrderRepository):
             id=UUID(row["id"]),
             status=OrderStatus(row["status"]),
             total_price=row["total_price"],
+            user_id=UUID(row["user_id"]),
             product_ids=product_ids,
         )
