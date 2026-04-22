@@ -1,3 +1,4 @@
+from decimal import Decimal
 from uuid import UUID
 
 import databases
@@ -52,7 +53,7 @@ class OrderRepository(AbstractOrderRepository):
         return OrderDetail(
             id=UUID(row["id"]),
             status=OrderStatus(row["status"]),
-            total_price=row["total_price"],
+            total_price=Decimal(str(row["total_price"])).quantize(Decimal("0.01")),
             created_at=row["created_at"],
             items=items,
         )
@@ -69,7 +70,7 @@ class OrderRepository(AbstractOrderRepository):
         return OrderDetail(
             id=UUID(row["id"]),
             status=OrderStatus(row["status"]),
-            total_price=row["total_price"],
+            total_price=Decimal(str(row["total_price"])).quantize(Decimal("0.01")),
             created_at=row["created_at"],
             items=items,
         )
@@ -81,6 +82,35 @@ class OrderRepository(AbstractOrderRepository):
             .values(status=status.value)
         )
         return await self.get_by_id(order_id)
+
+    async def list_all(self, offset: int = 0, limit: int = 20) -> tuple[list[Order], int]:
+        count_query = sqlalchemy.select(sqlalchemy.func.count()).select_from(orders_table)
+        total = await self._db.fetch_val(count_query)
+        rows = await self._db.fetch_all(orders_table.select().limit(limit).offset(offset))
+        orders = []
+        for row in rows:
+            product_ids = await self._fetch_product_ids(UUID(row["id"]))
+            orders.append(self._to_entity(row, product_ids))
+        return orders, total
+
+    async def list_for_user(
+        self, user_id: UUID, offset: int = 0, limit: int = 20
+    ) -> tuple[list[Order], int]:
+        where_clause = orders_table.c.user_id == str(user_id)
+        count_query = (
+            sqlalchemy.select(sqlalchemy.func.count())
+            .select_from(orders_table)
+            .where(where_clause)
+        )
+        total = await self._db.fetch_val(count_query)
+        rows = await self._db.fetch_all(
+            orders_table.select().where(where_clause).limit(limit).offset(offset)
+        )
+        orders = []
+        for row in rows:
+            product_ids = await self._fetch_product_ids(UUID(row["id"]))
+            orders.append(self._to_entity(row, product_ids))
+        return orders, total
 
     async def _fetch_product_ids(self, order_id: UUID) -> list[UUID]:
         rows = await self._db.fetch_all(
@@ -112,7 +142,7 @@ class OrderRepository(AbstractOrderRepository):
                 id=UUID(row["id"]),
                 name=row["name"],
                 variation=row["variation"],
-                unit_price=row["unit_price"],
+                unit_price=Decimal(str(row["unit_price"])).quantize(Decimal("0.01")),
             )
             for row in rows
         ]
@@ -122,7 +152,7 @@ class OrderRepository(AbstractOrderRepository):
         return Order(
             id=UUID(row["id"]),
             status=OrderStatus(row["status"]),
-            total_price=row["total_price"],
+            total_price=Decimal(str(row["total_price"])).quantize(Decimal("0.01")),
             user_id=UUID(row["user_id"]),
             product_ids=product_ids,
         )

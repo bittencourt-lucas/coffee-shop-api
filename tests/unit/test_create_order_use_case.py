@@ -1,6 +1,8 @@
-import pytest
+from decimal import Decimal
 from unittest.mock import AsyncMock
 from uuid import uuid4
+
+import pytest
 
 from src.core.entities import Product
 from src.core.enums import OrderStatus
@@ -10,8 +12,14 @@ from src.use_cases.order import CreateOrder
 _USER_ID = uuid4()
 
 
-def _make_product(base_price: float = 3.00, price_change: float = 0.50) -> Product:
-    return Product(id=uuid4(), name="Latte", base_price=base_price, variation="Vanilla", price_change=price_change)
+def _make_product(base_price: str = "3.00", price_change: str = "0.50") -> Product:
+    return Product(
+        id=uuid4(),
+        name="Latte",
+        base_price=Decimal(base_price),
+        variation="Vanilla",
+        price_change=Decimal(price_change),
+    )
 
 
 @pytest.fixture
@@ -41,23 +49,23 @@ def failing_payment_service() -> AsyncMock:
 
 
 async def test_calls_payment_service_with_computed_total(order_repo, product_repo, payment_service):
-    product = _make_product(base_price=3.00, price_change=0.50)
+    product = _make_product(base_price="3.00", price_change="0.50")
     product_repo.get_by_ids.return_value = [product]
 
     await CreateOrder(order_repo, product_repo, payment_service).execute([product.id], user_id=_USER_ID)
 
-    payment_service.process.assert_called_once_with(3.50)
+    payment_service.process.assert_called_once_with(Decimal("3.50"))
 
 
 async def test_total_price_is_sum_of_all_products(order_repo, product_repo, payment_service):
-    products = [_make_product(2.50, 0.00), _make_product(4.00, 0.30)]
+    products = [_make_product("2.50", "0.00"), _make_product("4.00", "0.30")]
     product_repo.get_by_ids.return_value = products
 
     order = await CreateOrder(order_repo, product_repo, payment_service).execute(
         [p.id for p in products], user_id=_USER_ID
     )
 
-    assert order.total_price == 6.80
+    assert order.total_price == Decimal("6.80")
 
 
 async def test_creates_order_in_repository_after_successful_payment(order_repo, product_repo, payment_service):

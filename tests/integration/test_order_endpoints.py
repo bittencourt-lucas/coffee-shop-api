@@ -40,7 +40,7 @@ async def _get_product_ids(client: AsyncClient, count: int = 2) -> list[str]:
     """Fetch real product IDs from the seeded menu."""
     menu = (await client.get("/menu")).json()
     ids = []
-    for item in menu:
+    for item in menu["items"]:
         for variation in item["variations"]:
             ids.append(variation["id"])
             if len(ids) == count:
@@ -147,7 +147,7 @@ class TestCreateOrderResponse:
 
     async def test_total_price_is_computed_from_products(self, order_client: AsyncClient):
         menu = (await order_client.get("/menu")).json()
-        variation = menu[0]["variations"][0]
+        variation = menu["items"][0]["variations"][0]
         data = (await order_client.post(
             "/orders/", json={"product_ids": [variation["id"]]}, headers=_auth_headers(Role.CUSTOMER)
         )).json()
@@ -358,3 +358,57 @@ class TestGetOrderDetail:
         assert "name" in item
         assert "variation" in item
         assert "unit_price" in item
+
+
+class TestListOrders:
+    async def test_returns_401_without_token(self, order_client: AsyncClient):
+        response = await order_client.get("/orders/")
+        assert response.status_code == 401
+
+    async def test_customer_sees_own_orders(self, order_client: AsyncClient):
+        product_ids = await _get_product_ids(order_client)
+        await order_client.post(
+            "/orders/", json={"product_ids": product_ids}, headers=_auth_headers(Role.CUSTOMER)
+        )
+        data = (await order_client.get("/orders/", headers=_auth_headers(Role.CUSTOMER))).json()
+        assert data["total"] == 1
+        assert len(data["items"]) == 1
+
+    async def test_customer_does_not_see_other_users_orders(self, order_client: AsyncClient):
+        product_ids = await _get_product_ids(order_client)
+        await order_client.post(
+            "/orders/", json={"product_ids": product_ids}, headers=_auth_headers(Role.CUSTOMER)
+        )
+        other_customer = _auth_headers(Role.CUSTOMER, user_id=uuid4())
+        data = (await order_client.get("/orders/", headers=other_customer)).json()
+        assert data["total"] == 0
+        assert data["items"] == []
+
+    async def test_manager_sees_all_orders(self, order_client: AsyncClient):
+        product_ids = await _get_product_ids(order_client)
+        await order_client.post(
+            "/orders/", json={"product_ids": product_ids}, headers=_auth_headers(Role.CUSTOMER)
+        )
+        await order_client.post(
+            "/orders/", json={"product_ids": product_ids},
+            headers=_auth_headers(Role.CUSTOMER, user_id=uuid4()),
+        )
+        data = (await order_client.get("/orders/", headers=_auth_headers(Role.MANAGER))).json()
+        assert data["total"] == 2
+
+    async def test_response_has_pagination_envelope(self, order_client: AsyncClient):
+        data = (await order_client.get("/orders/", headers=_auth_headers(Role.CUSTOMER))).json()
+        assert "items" in data
+        assert "total" in data
+        assert "page" in data
+        assert "page_size" in data
+
+    async def test_empty_list_when_no_orders(self, order_client: AsyncClient):
+        data = (await order_client.get("/orders/", headers=_auth_headers(Role.CUSTOMER))).json()
+        assert data["items"] == []
+        assert data["total"] == 0
+
+    async def test_default_page_and_page_size(self, order_client: AsyncClient):
+        data = (await order_client.get("/orders/", headers=_auth_headers(Role.CUSTOMER))).json()
+        assert data["page"] == 1
+        assert data["page_size"] == 20

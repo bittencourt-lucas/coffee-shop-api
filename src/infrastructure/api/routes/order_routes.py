@@ -1,7 +1,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 
 from src.core.enums import Role
@@ -24,11 +24,34 @@ from src.infrastructure.api.schemas import (
     OrderItemResponse,
     OrderResponse,
     OrderStatusUpdate,
+    PaginatedOrderResponse,
 )
 from src.infrastructure.api.middleware.rate_limit import limiter
-from src.use_cases.order import CreateOrder, GetOrderDetail, UpdateOrderStatus
+from src.use_cases.order import CreateOrder, GetOrderDetail, ListOrders, UpdateOrderStatus
 
 router = APIRouter(prefix="/orders", tags=["orders"])
+
+
+@router.get("/", response_model=PaginatedOrderResponse)
+async def list_orders(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    current_user: TokenData = Depends(get_current_user),
+    repo: AbstractOrderRepository = Depends(get_order_repository),
+):
+    offset = (page - 1) * page_size
+    orders, total = await ListOrders(repo).execute(
+        user_id=current_user.user_id,
+        role=current_user.role,
+        offset=offset,
+        limit=page_size,
+    )
+    return PaginatedOrderResponse(
+        items=[OrderResponse(**vars(order)) for order in orders],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @router.post("/", response_model=OrderResponse, status_code=status.HTTP_201_CREATED)

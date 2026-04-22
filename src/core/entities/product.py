@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from decimal import Decimal
 from uuid import UUID
 
 
@@ -6,6 +7,6 @@ from uuid import UUID
 class Product:
     id: UUID
     name: str
-    base_price: float
+    base_price: Decimal
     variation: str
-    price_change: float
+    price_change: Decimal

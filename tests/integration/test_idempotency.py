@@ -48,7 +48,7 @@ async def idempotency_client(test_db):
 
 async def _get_product_id(client: AsyncClient) -> str:
     menu = (await client.get("/menu")).json()
-    return menu[0]["variations"][0]["id"]
+    return menu["items"][0]["variations"][0]["id"]
 
 
 class TestIdempotencyKeyDeduplication:

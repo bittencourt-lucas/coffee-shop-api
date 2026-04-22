@@ -1,3 +1,4 @@
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from src.core.entities import Order
@@ -26,9 +27,9 @@ class CreateOrder:
             missing_ids = [pid for pid in product_ids if pid not in found_ids]
             raise InvalidProductError(missing_ids)
 
-        total_price = round(
-            sum(p.base_price + p.price_change for p in products), 2
-        )
+        total_price = sum(
+            (p.base_price + p.price_change for p in products), Decimal(0)
+        ).quantize(Decimal("0.01"))
 
         await self._payment_service.process(total_price)
 
