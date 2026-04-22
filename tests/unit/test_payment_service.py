@@ -10,6 +10,26 @@ _SUCCESS_DATA = {"id": "pay-123", "status": "approved"}
 _FAILURE_DATA = {"error": "declined"}
 
 
+@pytest.fixture(autouse=True)
+async def bypass_circuit_breaker():
+    async def passthrough(coro):
+        return await coro
+
+    with patch(
+        "src.infrastructure.services.payment_service.payment_circuit_breaker.call",
+        side_effect=passthrough,
+    ):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def no_sleep(monkeypatch):
+    async def instant(_):
+        pass
+
+    monkeypatch.setattr("tenacity.nap.sleep", instant)
+
+
 def _make_response(status_code: int, data: dict) -> MagicMock:
     resp = MagicMock()
     resp.status_code = status_code
@@ -19,10 +39,6 @@ def _make_response(status_code: int, data: dict) -> MagicMock:
 
 
 def _patch_client(*responses):
-    """
-    Patches httpx.AsyncClient so each call to client.post() consumes the
-    next item from `responses` — either returning a mock response or raising.
-    """
     mock_cm = MagicMock()
     mock_inner = AsyncMock()
     mock_cm.__aenter__ = AsyncMock(return_value=mock_inner)
@@ -131,3 +147,12 @@ async def test_logs_each_failed_attempt(caplog):
         await PaymentService().process(19.90)
     assert "1/3" in caplog.text
     assert "2/3" in caplog.text
+
+
+async def test_circuit_open_raises_payment_failed_error():
+    with patch(
+        "src.infrastructure.services.payment_service.payment_circuit_breaker.call",
+        side_effect=PaymentFailedError("Circuit breaker is OPEN — failing fast"),
+    ):
+        with pytest.raises(PaymentFailedError, match="OPEN"):
+            await PaymentService().process(19.90)

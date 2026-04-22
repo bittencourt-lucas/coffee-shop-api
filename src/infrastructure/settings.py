@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     jwt_secret_key: str = _DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
     jwt_expiration_minutes: int = 60
+    payment_circuit_breaker_threshold: int = 5
+    payment_circuit_breaker_recovery_seconds: float = 30.0
 
     model_config = {"env_prefix": "COFFEE_SHOP_"}
 
