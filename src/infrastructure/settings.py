@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./coffee_shop.db"
     payment_url: str = "https://challenge.trio.dev/api/v1/payment"
     notification_url: str = "https://challenge.trio.dev/api/v1/notification"
+    redis_url: str = "redis://localhost:6379"
     jwt_secret_key: str = _DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
     jwt_expiration_minutes: int = 60

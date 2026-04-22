@@ -61,6 +61,8 @@ class _ClientContext:
             patch("src.main.database.connect", new_callable=AsyncMock),
             patch("src.main.database.disconnect", new_callable=AsyncMock),
             patch("src.main.seed_catalog", new_callable=AsyncMock),
+            patch("src.main.notification_worker", new_callable=AsyncMock),
+            patch("src.main.redis_client.aclose", new_callable=AsyncMock),
         ]
 
     async def __aenter__(self) -> AsyncClient:
