@@ -53,7 +53,7 @@ Any out-of-sequence update returns `422`.
 ### External Integrations
 
 - **Payment** (`POST /api/v1/payment`) — called on order creation. Retries up to 3 times; returns `502` if all attempts fail. External service errors are not exposed to clients.
-- **Notification** (`POST /api/v1/notification`) — called after every status update. Runs as a fire-and-forget background task; failures are logged and never affect the response.
+- **Notification** (`POST /api/v1/notification`) — called after every status update. Status changes are published to a Redis Stream and delivered by a background worker. The worker retries up to 3 times with exponential backoff; after exhausting retries the message is acknowledged and the failure logged. Delivery is durable across retries and survives transient HTTP failures.
 
 ### Security
 
@@ -77,6 +77,7 @@ Any out-of-sequence update returns `422`.
 ### Prerequisites
 
 - Python 3.12+
+- Redis 7+ (for the notification queue)
 - A virtual environment with dependencies installed
 
 ### Setup
@@ -88,7 +89,7 @@ source venv/bin/activate        # macOS/Linux
 venv\Scripts\activate           # Windows
 
 # Install dependencies
-pip install fastapi[standard] databases[aiosqlite] alembic httpx pydantic-settings slowapi "python-jose[cryptography]" bcrypt
+pip install fastapi[standard] databases[aiosqlite] alembic httpx pydantic-settings slowapi "python-jose[cryptography]" bcrypt "redis[asyncio]"
 
 # (Optional) Copy and edit the environment file
 cp .env.example .env
@@ -106,6 +107,7 @@ All settings can be overridden via environment variables (prefixed with `COFFEE_
 | `COFFEE_SHOP_JWT_SECRET_KEY`          | `change-me-in-production`                        | JWT signing secret       |
 | `COFFEE_SHOP_JWT_ALGORITHM`           | `HS256`                                          | JWT signing algorithm    |
 | `COFFEE_SHOP_JWT_EXPIRATION_MINUTES`  | `60`                                             | Token lifetime (minutes) |
+| `COFFEE_SHOP_REDIS_URL`               | `redis://localhost:6379`                         | Redis connection URL for the notification queue |
 
 > **Important**: Always override `COFFEE_SHOP_JWT_SECRET_KEY` with a strong random value in any non-local environment.
 
@@ -154,7 +156,7 @@ pytest tests/ --cov=src --cov-report=term-missing
 
 ## Test Coverage
 
-137 tests across unit and integration suites.
+149 tests across unit and integration suites.
 
 ```
 Name                                                                   Stmts   Miss  Cover
