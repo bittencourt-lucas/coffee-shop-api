@@ -1,0 +1,32 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      COFFEE_SHOP_DATABASE_URL: sqlite+aiosqlite:////app/db/coffee_shop.db
+      COFFEE_SHOP_REDIS_URL: redis://redis:6379
+      COFFEE_SHOP_JWT_SECRET_KEY: ${COFFEE_SHOP_JWT_SECRET_KEY:-change-me-in-production}
+      COFFEE_SHOP_PAYMENT_URL: ${COFFEE_SHOP_PAYMENT_URL:-https://challenge.trio.dev/api/v1/payment}
+      COFFEE_SHOP_NOTIFICATION_URL: ${COFFEE_SHOP_NOTIFICATION_URL:-https://challenge.trio.dev/api/v1/notification}
+    volumes:
+      - db_data:/app/db
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  redis_data:
