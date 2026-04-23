@@ -1,3 +1,4 @@
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
@@ -38,7 +39,8 @@ def run_migrations_offline() -> None:
     script output.
 
     """
-    url = config.get_main_option("sqlalchemy.url")
+    env_url = os.getenv("COFFEE_SHOP_DATABASE_URL")
+    url = env_url.replace("+aiosqlite", "") if env_url else config.get_main_option("sqlalchemy.url")
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -57,11 +59,11 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
+    cfg = config.get_section(config.config_ini_section, {})
+    env_url = os.getenv("COFFEE_SHOP_DATABASE_URL")
+    if env_url:
+        cfg["sqlalchemy.url"] = env_url.replace("+aiosqlite", "")
+    connectable = engine_from_config(cfg, prefix="sqlalchemy.", poolclass=pool.NullPool)
 
     with connectable.connect() as connection:
         context.configure(

@@ -74,24 +74,53 @@ Any out-of-sequence update returns `422`.
 
 ---
 
+## Running with Docker
+
+### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) and [Docker Compose](https://docs.docker.com/compose/install/)
+
+### Start
+
+```bash
+# (Optional) Set a strong JWT secret — defaults to "change-me-in-production"
+export COFFEE_SHOP_JWT_SECRET_KEY=your-secret-here
+
+docker compose up --build
+```
+
+The API will be available at `http://localhost:8000`.
+Interactive docs: `http://localhost:8000/docs`.
+
+Database migrations run automatically before the server starts. SQLite data is persisted in a named Docker volume (`db_data`).
+
+### Stop
+
+```bash
+docker compose down
+```
+
+To also remove the persistent volumes (deletes all data):
+
+```bash
+docker compose down -v
+```
+
+---
+
 ## Running Locally
 
 ### Prerequisites
 
 - Python 3.12+
 - Redis 7+ (for the notification queue)
-- A virtual environment with dependencies installed
+- [Poetry](https://python-poetry.org/) for dependency management
 
 ### Setup
 
 ```bash
-# Create and activate a virtual environment
-python -m venv venv
-source venv/bin/activate        # macOS/Linux
-venv\Scripts\activate           # Windows
-
-# Install dependencies
-pip install fastapi[standard] databases[aiosqlite] alembic httpx pydantic-settings slowapi "python-jose[cryptography]" bcrypt "redis[asyncio]"
+# Install dependencies (Poetry will create and manage the virtualenv)
+poetry install
 
 # (Optional) Copy and edit the environment file
 cp .env.example .env
