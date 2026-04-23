@@ -80,18 +80,13 @@ Any out-of-sequence update returns `422`.
 
 - Python 3.12+
 - Redis 7+ (for the notification queue)
-- A virtual environment with dependencies installed
+- [Poetry](https://python-poetry.org/) for dependency management
 
 ### Setup
 
 ```bash
-# Create and activate a virtual environment
-python -m venv venv
-source venv/bin/activate        # macOS/Linux
-venv\Scripts\activate           # Windows
-
-# Install dependencies
-pip install fastapi[standard] databases[aiosqlite] alembic httpx pydantic-settings slowapi "python-jose[cryptography]" bcrypt "redis[asyncio]"
+# Install dependencies (Poetry will create and manage the virtualenv)
+poetry install
 
 # (Optional) Copy and edit the environment file
 cp .env.example .env
